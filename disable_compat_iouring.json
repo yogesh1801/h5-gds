@@ -5,8 +5,10 @@
     },
     "properties": {
         "use_compat_mode": false,
-        "gds_rdma_write_support": true,
         "allow_compat_mode": false,
+        "gds_rdma_write_support": true,
+        "force_odirect_mode": false,
+        "prefer_iouring": true,
         "max_direct_io_size_kb": 16384,
         "max_device_cache_size_kb": 131072,
         "max_device_pinned_mem_size_kb": 33554432,
@@ -26,6 +28,9 @@
         "max_io_threads": 4,
         "max_io_queue_depth": 128,
         "parallel_io": true,
-        "min_io_threshold_size_kb": 8192
+        "min_io_threshold_size_kb": 8192,
+        "max_request_parallelism": 4
     }
 }
+
+

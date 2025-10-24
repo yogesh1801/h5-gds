@@ -1,0 +1,228 @@
+#!/bin/bash
+#PBS -q regular-g
+#PBS -l select=1:ncpus=1
+#PBS -l walltime=01:00:00
+#PBS -W group_list=jh250079
+#PBS -j oe
+#PBS -N h5gds_sweep_job
+
+# Benchmark configuration
+NUM_MIN=1024
+NUM_MAX=134217728
+ELAPSE_MAX=60s
+COMMON_OPTION=""
+
+# Load required modules
+module purge
+module load cuda
+module unload nvidia
+
+# Log loaded modules for debugging
+echo "=== Loaded Modules ==="
+module list
+echo ""
+
+# Set HDF5 environment
+export HDF5_HOME=/work/jh250079/n14001/hdf5_install
+export PATH=$HDF5_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$HDF5_HOME/lib:$LD_LIBRARY_PATH
+
+# Set VFD-GDS environment
+export CPATH=/work/jh250079/n14001/vfd-gds/src:$CPATH
+export LD_LIBRARY_PATH=/work/jh250079/n14001/vfd-gds/build/bin:$LD_LIBRARY_PATH
+export HDF5_PLUGIN_PATH=/work/jh250079/n14001/h5-gds/build/bin/
+
+# Log environment for debugging
+echo "=== Environment Configuration ==="
+echo "HDF5_HOME: $HDF5_HOME"
+echo "HDF5_PLUGIN_PATH: $HDF5_PLUGIN_PATH"
+echo "CUDA_HOME: $CUDA_HOME"
+echo ""
+
+# Start timestamp
+TIME=`date`
+echo "=== Job Start: $TIME ==="
+echo ""
+
+for GPU_ID in 0
+do
+    echo "=== Processing GPU $GPU_ID ==="
+    export CUDA_VISIBLE_DEVICES=$GPU_ID
+    GPU_DIR=gpu${GPU_ID}
+    
+    # Create output directories
+    TEMP=${PBS_O_WORKDIR}/temp
+    mkdir -p "${TEMP}"
+    DUMP=${PBS_O_WORKDIR}/nvme
+    mkdir -p "${DUMP}"
+
+    # Get GPU PCIe bus ID and NUMA node
+    BUS_ID=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | tr '[:upper:]' '[:lower:]' | sed 's/^0\{0,\}\([0-9]\{4\}\)/\1/')
+    NUMA_NODE=`cat /sys/bus/pci/devices/$BUS_ID/numa_node`
+    
+    echo "GPU $GPU_ID: BUS_ID=$BUS_ID, NUMA_NODE=$NUMA_NODE"
+    
+    # Display GPU topology for verification
+    echo "=== GPU Topology ==="
+    nvidia-smi topo -m
+    echo ""
+
+    # Run GDS health check
+    if [ -f "$CUDA_HOME/gds/tools/gdscheck" ]; then
+        echo "=== GPUDirect Storage Health Check ==="
+        numactl --cpunodebind=$NUMA_NODE --membind=$NUMA_NODE $CUDA_HOME/gds/tools/gdscheck -p
+        echo ""
+    else
+        echo "WARNING: gdscheck not found, skipping GDS verification"
+        echo ""
+    fi
+
+    # Scratch directory for this GPU
+    ROOT=/tmp/yogesh/${GPU_DIR}
+    
+    for HDF5_MODE in 0
+    do
+        if [ $HDF5_MODE -eq 0 ]; then
+            OPTION="--asis"
+            HDF5_TAG=asis
+        fi
+        if [ $HDF5_MODE -eq 1 ]; then
+            OPTION=""
+            HDF5_TAG=hyperslab
+        fi
+
+        for GDS_MODE in 0 1
+        do
+            if [ $GDS_MODE -eq 0 ]; then
+                # Native GDS mode - direct GPU-to-storage transfers
+                export CUFILE_ENV_PATH_JSON=${PBS_O_WORKDIR}/disable_compat.json
+                GDS_TAG=native
+                echo "=== Running in NATIVE GDS mode (${HDF5_TAG}) ==="
+            fi
+            if [ $GDS_MODE -eq 1 ]; then
+                # Compatible mode - transfers via CPU/page cache
+                export CUFILE_ENV_PATH_JSON=${PBS_O_WORKDIR}/force_compat.json
+                GDS_TAG=compat
+                echo "=== Running in COMPATIBLE mode (${HDF5_TAG}) ==="
+            fi
+            
+            echo "cuFile config: $CUFILE_ENV_PATH_JSON"
+            
+            DIR=${HDF5_TAG}/${GDS_TAG}
+
+            # Create scratch directory
+            SCRATCH=$ROOT/$DIR
+            mkdir -p "$SCRATCH"
+            cd $SCRATCH
+            echo "Working directory: $SCRATCH"
+
+            # Copy the software and prepare directories
+            cp -r ${PBS_O_WORKDIR}/bin .
+            mkdir -p dat log
+            
+            # Verify storage device for native GDS mode
+            if [ $GDS_MODE -eq 0 ]; then
+                echo "Storage device info for $SCRATCH:"
+                df -h $SCRATCH
+                lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,ROTA | grep -A10 "$(df $SCRATCH | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//')"
+                echo ""
+            fi
+
+            # Run benchmarks with increasing particle counts
+            for (( NUM = $NUM_MIN ; NUM <= $NUM_MAX ; NUM *= 2 ))
+            do
+                echo "Running benchmark: NUM=$NUM, FBLK=16777216"
+                
+                # Run with NUMA affinity for optimal performance
+                # Use numactl to bind process to same NUMA node as GPU
+                numactl --cpunodebind=$NUMA_NODE --membind=$NUMA_NODE \
+                    timeout ${ELAPSE_MAX} bin/h5gds ${COMMON_OPTION} $OPTION --num $NUM --fblk 16777216
+                
+                EXIT_CODE=$?
+                if [ $EXIT_CODE -eq 124 ]; then
+                    echo "WARNING: Benchmark timed out after ${ELAPSE_MAX}"
+                elif [ $EXIT_CODE -ne 0 ]; then
+                    echo "ERROR: Benchmark failed with exit code $EXIT_CODE"
+                fi
+                
+                # Sync results to temp directory
+                rsync -av log ${TEMP}/
+                rsync -av dat ${TEMP}/
+            done
+            
+            echo ""
+        done
+    done
+    
+    # Copy all results to final destination
+    echo "=== Copying results to ${DUMP}/ ==="
+    rsync -av ${ROOT} ${DUMP}/
+    
+    # Cleanup scratch space
+    echo "=== Cleaning up scratch space ==="
+    rm -rf ${ROOT}
+    rm -rf ${TEMP}
+    
+    echo "GPU $GPU_ID processing complete"
+    echo ""
+done
+
+# Finish timestamp
+TIME=`date`
+echo "=== Job Finish: $TIME ==="
+
+# Collect cuFile logs
+echo "=== Collecting cuFile Logs ==="
+if ls /tmp/cufile*.log 1> /dev/null 2>&1; then
+    echo "✓ cuFile logs found in /tmp/"
+    
+    # Copy logs to output directory for analysis
+    mkdir -p ${PBS_O_WORKDIR}/cufile_logs
+    cp /tmp/cufile*.log ${PBS_O_WORKDIR}/cufile_logs/ 2>/dev/null
+    
+    # Show log summary
+    echo ""
+    echo "Log files:"
+    ls -lh /tmp/cufile*.log
+    echo ""
+    
+    # Show key information from latest log
+    LATEST_LOG=$(ls -t /tmp/cufile*.log | head -1)
+    echo "=== Key Info from $LATEST_LOG ==="
+    echo ""
+    
+    # Check mode
+    echo "Mode Configuration:"
+    grep -i "use_compat_mode\|force_compat_mode\|allow_compat_mode" "$LATEST_LOG" 2>/dev/null | head -5
+    echo ""
+    
+    # Check for errors
+    ERROR_COUNT=$(grep -ic "error" "$LATEST_LOG" 2>/dev/null || echo "0")
+    if [ "$ERROR_COUNT" -gt 0 ]; then
+        echo "⚠ Found $ERROR_COUNT errors in log:"
+        grep -i "error" "$LATEST_LOG" | tail -10
+        echo ""
+    fi
+    
+    # Check for compat fallback
+    if grep -qi "falling back\|compat.*enabled" "$LATEST_LOG" 2>/dev/null; then
+        echo "⚠ WARNING: Fell back to compat mode!"
+        grep -i "falling back\|compat.*enabled" "$LATEST_LOG"
+        echo ""
+    fi
+    
+    echo "Full logs saved to: ${PBS_O_WORKDIR}/cufile_logs/"
+else
+    echo "⚠ No cuFile logs found in /tmp/"
+    echo "This may indicate cuFile is not being used or logging is not working"
+fi
+echo ""
+
+# Also check system cufile log if exists
+if [ -f /var/log/cufile.log ]; then
+    echo "=== System cuFile log entries ==="
+    tail -n 30 /var/log/cufile.log
+fi
+
+exit 0
+

@@ -1,7 +1,32 @@
 {
-            "properties": {
-                            "allow_compat_mode": true,
-                            "force_compat_mode": true
-            }
+    "logging": {
+        "dir": "/tmp",
+        "level": "DEBUG"
+    },
+    "properties": {
+        "use_compat_mode": true,
+        "force_compat_mode": true,
+        "allow_compat_mode": true,
+        "gds_rdma_write_support": true,
+        "max_direct_io_size_kb": 16384,
+        "max_device_cache_size_kb": 131072,
+        "max_device_pinned_mem_size_kb": 33554432,
+        "posix_pool_slab_size_kb": [4, 1024, 16384],
+        "posix_pool_slab_count": [128, 64, 32]
+    },
+    "fs": {
+        "generic": {
+            "posix_unaligned_writes": false
+        }
+    },
+    "profile": {
+        "nvtx": true,
+        "cufile_stats": 1
+    },
+    "execution": {
+        "max_io_threads": 4,
+        "max_io_queue_depth": 128,
+        "parallel_io": true,
+        "min_io_threshold_size_kb": 8192
+    }
 }
-
