@@ -19,11 +19,13 @@
 #include <boost/uuid/uuid_generators.hpp>  // boost::uuids::random_generator
 #include <boost/uuid/uuid_io.hpp>          // convert boost::uuids::uuid to std::string
 #include <cstdlib>                         // std::exit
+#include <fcntl.h>                         // open(), O_RDONLY
 #include <fstream>                         // std::ofstream
 #include <iomanip>                         // std::setw
 #include <iostream>                        // std::cout
 #include <sstream>                         // std::stringstream
 #include <string>                          // std::string
+#include <unistd.h>                        // close(), posix_fadvise()
 
 #include "allocate.cuh"
 #include "common.cuh"
@@ -42,6 +44,20 @@ struct compare_vel_xy {
     return ((a.x == b.x) && (a.y == b.y));
   }
 };
+
+///
+/// @brief Drop filesystem cache for a file (doesn't require root)
+///
+/// @param[in] filepath Path to the file
+///
+static void drop_file_cache(const std::string &filepath) {
+  int fd = open(filepath.c_str(), O_RDONLY);
+  if (fd >= 0) {
+    // Tell kernel we don't need this file's pages in cache
+    posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    close(fd);
+  }
+}
 
 ///
 /// @brief main function
@@ -115,17 +131,13 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   set_uniform_sphere(num, pos, vel_xy, vel_z, idx, mass, radius, virial, newton);
 
   constexpr auto benchmark = [](const auto func) noexcept(false) {
-    // cudaDeviceSynchronize();
+    cudaDeviceSynchronize();  // Ensure all prior GPU work is complete
     struct timespec ini;
-    // clock_gettime(CLOCK_MONOTONIC_RAW, &ini);
     clock_gettime(CLOCK_MONOTONIC, &ini);
-    // clock_gettime(CLOCK_BOOTTIME, &ini);
     func();
-    // cudaDeviceSynchronize();
+    cudaDeviceSynchronize();  // Wait for GPU work to complete
     struct timespec end;
-    // clock_gettime(CLOCK_MONOTONIC_RAW, &end);
     clock_gettime(CLOCK_MONOTONIC, &end);
-    // clock_gettime(CLOCK_BOOTTIME, &end);
     return (std::fma(1.0e-9, static_cast<double>(end.tv_nsec - ini.tv_nsec), end.tv_sec - ini.tv_sec));
   };
 
@@ -149,6 +161,11 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   const auto series = boost::lexical_cast<std::string>(uuid);
   auto name = "dat/" + series + ".h5";
   auto target = H5Fcreate(name.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+  if (target < 0) {
+    std::cerr << __FILE__ << "(" << __LINE__ << "): " << __func__ << ": ERROR: Failed to create HDF5 file: " << name << std::endl
+              << std::flush;
+    std::exit(EXIT_FAILURE);
+  }
   // preparation for H5Dwrite_multi()
   h5write.commit(hdf5_dataspace_N, target, "id", util::hdf5::h5type(*idx), idx);
   const auto FPtype = util::hdf5::h5type(*vel_z);
@@ -163,10 +180,11 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     h5write.commit(hdf5_dataspace_N, target, "vel_z", util::hdf5::h5type(*vel_z), vel_z);
   }
   // execute H5Dwrite_multi()
-  // h5write.execute();
   const auto elapse_write = benchmark([&h5write]() { h5write.execute(); });
   // write attribute
   util::hdf5::write_attr(hdf5_dataspace_1, target, "num", &num);
+  // flush to ensure data is written to storage before timing read
+  H5Fflush(target, H5F_SCOPE_GLOBAL);
   // close the file
   H5Fclose(target);
 
@@ -219,8 +237,16 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     xml.close();
   }
 
+  // drop filesystem cache for the file to ensure cold read
+  drop_file_cache(name);
+  
   // read the file and compare
   target = H5Fopen(name.c_str(), H5F_ACC_RDONLY, fapl);
+  if (target < 0) {
+    std::cerr << __FILE__ << "(" << __LINE__ << "): " << __func__ << ": ERROR: Failed to open HDF5 file: " << name << std::endl
+              << std::flush;
+    std::exit(EXIT_FAILURE);
+  }
   auto num_read = std::remove_const_t<decltype(num)>{};
   util::hdf5::read_attr(target, "num", &num_read);
   if (num_read != num) {
@@ -316,6 +342,11 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
 
   release_particles(pos, vel_xy, vel_z, idx);
   release_particles(pos_read, vel_xy_read, vel_z_read, idx_read);
+
+  // clean up test file to prevent disk filling
+  if (std::remove(name.c_str()) != 0) {
+    std::cerr << "Warning: Failed to delete test file: " << name << std::endl;
+  }
 
   std::exit(EXIT_SUCCESS);
 }
