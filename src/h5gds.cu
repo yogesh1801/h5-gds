@@ -187,6 +187,21 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   H5Fflush(target, H5F_SCOPE_GLOBAL);
   // close the file
   H5Fclose(target);
+  
+  // Force all data to physical storage (not just storage controller cache)
+  sync();  // Flush all dirty filesystem buffers
+  int fd = open(name.c_str(), O_RDONLY);
+  if (fd >= 0) {
+    fsync(fd);  // Ensure this specific file is on disk
+    close(fd);
+  }
+  // Also sync the directory metadata
+  std::string dir = "dat";
+  int dirfd = open(dir.c_str(), O_RDONLY | O_DIRECTORY);
+  if (dirfd >= 0) {
+    fsync(dirfd);
+    close(dirfd);
+  }
 
   // generate XDMF file if requested
   if (!asis && write_xdmf) {
@@ -237,8 +252,14 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     xml.close();
   }
 
+  // Ensure GPU is completely idle before read benchmark
+  cudaDeviceSynchronize();
+  
   // drop filesystem cache for the file to ensure cold read
   drop_file_cache(name);
+  
+  // Small delay to ensure all system state has settled
+  usleep(100000);  // 100ms delay
   
   // read the file and compare
   target = H5Fopen(name.c_str(), H5F_ACC_RDONLY, fapl);
