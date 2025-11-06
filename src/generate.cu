@@ -39,7 +39,11 @@
 ///
 __global__ void set_uniform_sphere_dev(const type::idx num, type::pos *pos, const type::vel_z rad, const decltype(rad) Mtot, type::vel_xy *vel_xy, type::vel_z *vel_z, type::idx *id, const decltype(rad) sig1d, curandStateMtgp32 *state, const type::idx offset = 0) {
   const auto ii = offset + GLOBALIDX_X1D;
-  const auto mass = (ii < num) ? (Mtot / static_cast<decltype(Mtot)>(num)) : static_cast<decltype(Mtot)>(0.0);  // set massless particle to remove if statements in gravity calculation
+  
+  // Early exit for out-of-bounds threads to prevent memory corruption
+  if (ii >= num) return;
+  
+  const auto mass = Mtot / static_cast<decltype(Mtot)>(num);
   // solve the warp divergence if necessary
 #if __CUDA_ARCH__ >= 700
   __syncwarp();
@@ -57,7 +61,6 @@ __global__ void set_uniform_sphere_dev(const type::idx num, type::pos *pos, cons
   pi.y = RR * std::sin(theta);
   pi.z = rr * prj;
   pi.w = mass;
-  // pi.w = curand_normal(&state[BLOCKIDX_X1D]);
   pos[ii] = pi;
 
   // set particle velocity
@@ -69,7 +72,6 @@ __global__ void set_uniform_sphere_dev(const type::idx num, type::pos *pos, cons
 
   // set particle ID
   id[ii] = ii;
-  // id[ii] = static_cast<std::remove_reference_t<decltype(*id)>>(curand_normal(&state[BLOCKIDX_X1D]));
 }
 
 void set_uniform_sphere(const type::idx num, type::pos *pos, type::vel_xy *vel_xy, type::vel_z *vel_z, type::idx *id, const type::vel_z Mtot, const decltype(Mtot) rad, const decltype(Mtot) virial, const decltype(Mtot) newton) noexcept(false) {

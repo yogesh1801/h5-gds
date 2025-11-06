@@ -45,15 +45,19 @@ void allocate_particles(type::pos **pos, type::vel_xy **vel_xy, type::vel_z **ve
   checkCudaErrors(cudaMalloc((void **)idx, size * sizeof(std::remove_reference_t<decltype(**idx)>)));
 
   // zero-clear arrays (for safety of massless particles)
-  checkCudaErrors(cudaMemset(*pos, 0.0F, size * sizeof(std::remove_reference_t<decltype(**pos)>)));
-  checkCudaErrors(cudaMemset(*vel_xy, 0.0F, size * sizeof(std::remove_reference_t<decltype(**vel_xy)>)));
-  checkCudaErrors(cudaMemset(*vel_z, 0.0F, size * sizeof(std::remove_reference_t<decltype(**vel_z)>)));
-  checkCudaErrors(cudaMemset(*idx, std::numeric_limits<std::remove_reference_t<decltype(**idx)>>::min(), size * sizeof(std::remove_reference_t<decltype(**idx)>)));
+  checkCudaErrors(cudaMemset(*pos, 0, size * sizeof(std::remove_reference_t<decltype(**pos)>)));
+  checkCudaErrors(cudaMemset(*vel_xy, 0, size * sizeof(std::remove_reference_t<decltype(**vel_xy)>)));
+  checkCudaErrors(cudaMemset(*vel_z, 0, size * sizeof(std::remove_reference_t<decltype(**vel_z)>)));
+  checkCudaErrors(cudaMemset(*idx, 0, size * sizeof(std::remove_reference_t<decltype(**idx)>)));
 #else   //! defined(HOST_MALLOC_AND_FIRST_TOUCH)
   *pos = (type::pos *)malloc(size * sizeof(std::remove_reference_t<decltype(**pos)>));
+  if (*pos == nullptr) throw std::bad_alloc();
   *vel_xy = (type::vel_xy *)malloc(size * sizeof(std::remove_reference_t<decltype(**vel_xy)>));
+  if (*vel_xy == nullptr) throw std::bad_alloc();
   *vel_z = (type::vel_z *)malloc(size * sizeof(std::remove_reference_t<decltype(**vel_z)>));
+  if (*vel_z == nullptr) throw std::bad_alloc();
   *idx = (type::idx *)malloc(size * sizeof(std::remove_reference_t<decltype(**idx)>));
+  if (*idx == nullptr) throw std::bad_alloc();
   first_touch<<<(size + NTHREADS - 1) / NTHREADS, NTHREADS>>>(*pos, *vel_xy, *vel_z, *idx, size);
   checkCudaErrors(cudaDeviceSynchronize());
 #endif  //! defined(HOST_MALLOC_AND_FIRST_TOUCH)
