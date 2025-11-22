@@ -1,0 +1,195 @@
+#!/bin/bash
+#PBS -q debug-g
+#PBS -l select=1
+#PBS -l walltime=00:30:00
+#PBS -W group_list=jh250079
+#PBS -j oe
+#PBS -N h5gds_sweep
+
+# ============================================
+# BENCHMARK CONFIGURATION
+# ============================================
+# Particle counts (file sizes)
+NUM_VALUES=(1000000 5000000 10000000 32000000 64000000 128000000)
+
+# Block sizes in bytes
+FBLK_VALUES=(524288 1048576 2097152 4194304 8388608)  # 512KB, 1MB, 2MB, 4MB, 8MB
+
+# Thread counts
+THREAD_VALUES=(1 2 4)
+
+# VFD modes to test
+VFD_MODES=(gds sec2)
+
+# Timeout for each benchmark run
+ELAPSE_MAX=120s
+
+# Number of iterations for statistical averaging
+ITERATIONS=3
+
+# ============================================
+# ENVIRONMENT SETUP
+# ============================================
+module purge
+module load cuda
+module unload nvidia
+
+echo "=== Loaded Modules ==="
+module list
+echo ""
+
+# Set HDF5 environment
+export HDF5_HOME=/work/jh250079/n14001/hdf5_install
+export PATH=$HDF5_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$HDF5_HOME/lib:$LD_LIBRARY_PATH
+
+# Set VFD-GDS environment
+export CPATH=/work/jh250079/n14001/vfd-gds/src:$CPATH
+export LD_LIBRARY_PATH=/work/jh250079/n14001/vfd-gds/build/bin:$LD_LIBRARY_PATH
+export HDF5_PLUGIN_PATH=/work/jh250079/n14001/h5-gds/build/bin/
+
+echo "=== Environment Configuration ==="
+echo "HDF5_HOME: $HDF5_HOME"
+echo "HDF5_PLUGIN_PATH: $HDF5_PLUGIN_PATH"
+echo "CUDA_HOME: $CUDA_HOME"
+echo ""
+
+# Start timestamp
+echo "=== Job Start: $(date) ==="
+echo ""
+
+# ============================================
+# GPU CONFIGURATION (Fixed at GPU 0)
+# ============================================
+GPU_ID=0
+export CUDA_VISIBLE_DEVICES=$GPU_ID
+
+echo "=== Using GPU $GPU_ID ==="
+
+# Get GPU PCIe bus ID and NUMA node
+BUS_ID=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | tr '[:upper:]' '[:lower:]' | sed 's/^0\{0,\}\([0-9]\{4\}\)/\1/')
+NUMA_NODE=$(cat /sys/bus/pci/devices/$BUS_ID/numa_node)
+
+echo "GPU $GPU_ID: BUS_ID=$BUS_ID, NUMA_NODE=$NUMA_NODE"
+
+# Display GPU topology
+echo "=== GPU Topology ==="
+nvidia-smi topo -m
+echo ""
+
+# Run GDS health check
+if [ -f "$CUDA_HOME/gds/tools/gdscheck" ]; then
+    echo "=== GPUDirect Storage Health Check ==="
+    numactl --cpunodebind=$NUMA_NODE --membind=$NUMA_NODE $CUDA_HOME/gds/tools/gdscheck -p
+    echo ""
+else
+    echo "WARNING: gdscheck not found, skipping GDS verification"
+fi
+
+# ============================================
+# DIRECTORY SETUP
+# ============================================
+ROOT="/tmp/yogesh/gpu${GPU_ID}"
+TEMP="${PBS_O_WORKDIR}/temp"
+DUMP="${PBS_O_WORKDIR}/results"
+
+mkdir -p "${ROOT}"
+mkdir -p "${TEMP}"
+mkdir -p "${DUMP}"
+
+# Copy executable and prepare directories
+cd "${ROOT}"
+cp -r ${PBS_O_WORKDIR}/bin .
+mkdir -p dat log
+
+echo "Working directory: ${ROOT}"
+echo "Results will be saved to: ${DUMP}"
+echo ""
+
+# ============================================
+# PARAMETER SWEEP
+# ============================================
+TOTAL_RUNS=$((${#NUM_VALUES[@]} * ${#FBLK_VALUES[@]} * ${#THREAD_VALUES[@]} * ${#VFD_MODES[@]}))
+CURRENT_RUN=0
+
+echo "=== Starting Parameter Sweep ==="
+echo "Total configurations to test: ${TOTAL_RUNS}"
+echo ""
+
+# Loop over VFD modes
+for VFD in "${VFD_MODES[@]}"
+do
+    echo "========================================="
+    echo "VFD MODE: ${VFD}"
+    echo "========================================="
+    
+    # Loop over particle counts (file sizes)
+    for NUM in "${NUM_VALUES[@]}"
+    do
+        # Loop over block sizes
+        for FBLK in "${FBLK_VALUES[@]}"
+        do
+            # Calculate copy buffer size (match block size)
+            CBUF=$FBLK
+            
+            # Loop over thread counts
+            for THREADS in "${THREAD_VALUES[@]}"
+            do
+                CURRENT_RUN=$((CURRENT_RUN + 1))
+                
+                echo ""
+                echo "--- Run ${CURRENT_RUN}/${TOTAL_RUNS} ---"
+                echo "VFD=$VFD, NUM=$NUM, FBLK=$FBLK, CBUF=$CBUF, THREADS=$THREADS, ITERATIONS=$ITERATIONS"
+                
+                # Run benchmark with NUMA affinity
+                timeout ${ELAPSE_MAX} numactl --cpunodebind=$NUMA_NODE --membind=$NUMA_NODE \
+                    bin/h5gds \
+                    --asis \
+                    --num $NUM \
+                    --fblk $FBLK \
+                    --cbuf $CBUF \
+                    --threads $THREADS \
+                    --vfd $VFD \
+                    --iterations $ITERATIONS
+                
+                EXIT_CODE=$?
+                if [ $EXIT_CODE -eq 124 ]; then
+                    echo "WARNING: Benchmark timed out after ${ELAPSE_MAX}"
+                elif [ $EXIT_CODE -ne 0 ]; then
+                    echo "ERROR: Benchmark failed with exit code $EXIT_CODE"
+                fi
+                
+                # Sync results to temp directory periodically
+                rsync -av log/ ${TEMP}/log/
+                
+            done  # THREADS loop
+        done  # FBLK loop
+    done  # NUM loop
+    
+    echo ""
+done  # VFD loop
+
+# ============================================
+# CLEANUP AND RESULTS
+# ============================================
+echo "=== Copying final results to ${DUMP}/ ==="
+rsync -av log/ ${DUMP}/log/
+cp log/h5gds_benchmark.csv ${DUMP}/h5gds_benchmark_gpu${GPU_ID}.csv
+
+echo "=== Cleaning up scratch space ==="
+rm -rf ${ROOT}
+rm -rf ${TEMP}
+
+echo ""
+echo "=== Job Finish: $(date) ==="
+echo "Results saved to: ${DUMP}/h5gds_benchmark_gpu${GPU_ID}.csv"
+
+# Display summary statistics
+if [ -f "${DUMP}/h5gds_benchmark_gpu${GPU_ID}.csv" ]; then
+    echo ""
+    echo "=== Benchmark Summary ==="
+    echo "Total rows: $(wc -l < ${DUMP}/h5gds_benchmark_gpu${GPU_ID}.csv)"
+    head -1 ${DUMP}/h5gds_benchmark_gpu${GPU_ID}.csv
+fi
+
+exit 0

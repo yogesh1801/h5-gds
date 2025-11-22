@@ -18,17 +18,19 @@
 #include <boost/program_options.hpp>       // boost::program_options
 #include <boost/uuid/uuid_generators.hpp>  // boost::uuids::random_generator
 #include <boost/uuid/uuid_io.hpp>          // convert boost::uuids::uuid to std::string
+#include <algorithm>                       // std::min_element, std::max_element
 #include <cstdlib>                         // std::exit
 #include <fcntl.h>                         // open(), O_RDONLY
 #include <fstream>                         // std::ofstream
 #include <iomanip>                         // std::setw
 #include <iostream>                        // std::cout
+#include <mutex>                           // std::mutex
+#include <numeric>                         // std::accumulate
 #include <sstream>                         // std::stringstream
 #include <string>                          // std::string
 #include <thread>                          // std::thread
 #include <unistd.h>                        // close(), posix_fadvise()
 #include <vector>                          // std::vector
-#include <mutex>                           // std::mutex
 
 #include "allocate.cuh"
 #include "common.cuh"
@@ -337,6 +339,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
       "xdmf", boost::program_options::bool_switch()->default_value(false), "generate XDMF file to visualize the snapshot")(
       "threads", boost::program_options::value<int>()->default_value(1), "number of concurrent threads")(
       "vfd", boost::program_options::value<std::string>()->default_value("gds"), "VFD to use: gds (GPUDirect Storage), sec2 (POSIX unbuffered), direct (O_DIRECT)")(
+      "iterations", boost::program_options::value<int>()->default_value(3), "number of benchmark iterations to average (reduces variance)")(
       "help,h", "Help");
   // read input arguments
   boost::program_options::variables_map vm;
@@ -359,7 +362,14 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   const auto write_xdmf = vm["xdmf"].as<bool>();
   const auto num_threads = vm["threads"].as<int>();
   const auto vfd_name = vm["vfd"].as<std::string>();
+  const auto iterations = vm["iterations"].as<int>();
   vm.clear();
+
+  // Validate iterations
+  if (iterations < 1) {
+    std::cerr << "ERROR: iterations must be at least 1" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // Validate VFD selection
   if (vfd_name != "gds" && vfd_name != "sec2" && vfd_name != "direct") {
@@ -393,78 +403,133 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   util::hdf5::create_h5t_real2();
   util::hdf5::create_h5t_real4();
 
-  std::vector<WorkerResult> results(num_threads);
-
   // ===============================================
-  // PHASE 1: WRITE BENCHMARK
+  // MULTIPLE ITERATIONS FOR STATISTICAL AVERAGING
   // ===============================================
-  std::cout << "Phase 1: Write benchmark - " << num_threads << " threads writing..." << std::endl;
-  
-  std::vector<std::thread> write_threads;
-  for (int i = 0; i < num_threads; ++i) {
-    write_threads.emplace_back(worker_write, i, num, cbuf, fblk, memb, asis, write_xdmf, vfd_name, idx, pos, vel_xy, vel_z, std::ref(results[i]));
-  }
+  std::vector<double> all_write_times;
+  std::vector<double> all_read_times;
+  all_write_times.reserve(iterations);
+  all_read_times.reserve(iterations);
 
-  // Join write threads
-  for (auto &t : write_threads) {
-    t.join();
-  }
+  std::cout << "Running " << iterations << " iteration(s) for statistical averaging..." << std::endl;
 
-  // Check write phase success
-  bool write_success = true;
-  for (const auto &res : results) {
-    if (!res.success) {
-      write_success = false;
-      break;
+  for (int iter = 0; iter < iterations; ++iter) {
+    if (iterations > 1) {
+      std::cout << "\n=== Iteration " << (iter + 1) << "/" << iterations << " ===" << std::endl;
     }
+
+    std::vector<WorkerResult> results(num_threads);
+
+    // ===============================================
+    // PHASE 1: WRITE BENCHMARK
+    // ===============================================
+    std::cout << "Phase 1: Write benchmark - " << num_threads << " threads writing..." << std::endl;
+    
+    std::vector<std::thread> write_threads;
+    for (int i = 0; i < num_threads; ++i) {
+      write_threads.emplace_back(worker_write, i, num, cbuf, fblk, memb, asis, write_xdmf, vfd_name, idx, pos, vel_xy, vel_z, std::ref(results[i]));
+    }
+
+    // Join write threads
+    for (auto &t : write_threads) {
+      t.join();
+    }
+
+    // Check write phase success
+    bool write_success = true;
+    for (const auto &res : results) {
+      if (!res.success) {
+        write_success = false;
+        break;
+      }
+    }
+
+    if (!write_success) {
+      std::cerr << "ERROR: One or more threads failed during write phase." << std::endl;
+      util::hdf5::remove_h5t_real2();
+      util::hdf5::remove_h5t_real4();
+      release_particles(pos, vel_xy, vel_z, idx);
+      std::exit(EXIT_FAILURE);
+    }
+
+    // Collect write time (max across threads)
+    double max_write_time = 0.0;
+    for (const auto &res : results) {
+      if (res.write_time > max_write_time) max_write_time = res.write_time;
+    }
+    all_write_times.push_back(max_write_time);
+
+    std::cout << "Write phase completed: " << max_write_time << " s" << std::endl;
+
+    // ===============================================
+    // PHASE 2: READ BENCHMARK
+    // ===============================================
+    std::cout << "Phase 2: Read benchmark - " << num_threads << " threads reading..." << std::endl;
+
+    std::vector<std::thread> read_threads;
+    for (int i = 0; i < num_threads; ++i) {
+      read_threads.emplace_back(worker_read, i, num, cbuf, fblk, memb, skip, asis, vfd_name, idx, pos, vel_xy, vel_z, std::ref(results[i]));
+    }
+
+    // Join read threads
+    for (auto &t : read_threads) {
+      t.join();
+    }
+
+    // Check read phase success
+    bool all_success = true;
+    for (const auto &res : results) {
+      if (!res.success) {
+        all_success = false;
+        break;
+      }
+    }
+
+    if (!all_success) {
+      std::cerr << "ERROR: One or more threads failed during read phase." << std::endl;
+      util::hdf5::remove_h5t_real2();
+      util::hdf5::remove_h5t_real4();
+      release_particles(pos, vel_xy, vel_z, idx);
+      std::exit(EXIT_FAILURE);
+    }
+
+    // Collect read time (max across threads)
+    double max_read_time = 0.0;
+    for (const auto &res : results) {
+      if (res.read_time > max_read_time) max_read_time = res.read_time;
+    }
+    all_read_times.push_back(max_read_time);
+
+    std::cout << "Read phase completed: " << max_read_time << " s" << std::endl;
   }
 
-  if (!write_success) {
-    std::cerr << "ERROR: One or more threads failed during write phase." << std::endl;
-    util::hdf5::remove_h5t_real2();
-    util::hdf5::remove_h5t_real4();
-    release_particles(pos, vel_xy, vel_z, idx);
-    std::exit(EXIT_FAILURE);
-  }
-
-  std::cout << "Write phase completed successfully." << std::endl;
-
-  // ===============================================
-  // PHASE 2: READ BENCHMARK
-  // ===============================================
-  std::cout << "Phase 2: Read benchmark - " << num_threads << " threads reading..." << std::endl;
-
-  std::vector<std::thread> read_threads;
-  for (int i = 0; i < num_threads; ++i) {
-    read_threads.emplace_back(worker_read, i, num, cbuf, fblk, memb, skip, asis, vfd_name, idx, pos, vel_xy, vel_z, std::ref(results[i]));
-  }
-
-  // Join read threads
-  for (auto &t : read_threads) {
-    t.join();
-  }
-
-  // Cleanup HDF5 compound types after all threads have completed
+  // Cleanup HDF5 compound types after all iterations completed
   util::hdf5::remove_h5t_real2();
   util::hdf5::remove_h5t_real4();
 
-  // Aggregate results
-  double max_write_time = 0.0;
-  double max_read_time = 0.0;
-  bool all_success = true;
+  // ===============================================
+  // CALCULATE STATISTICS
+  // ===============================================
+  auto calc_mean = [](const std::vector<double>& vec) {
+    return std::accumulate(vec.begin(), vec.end(), 0.0) / vec.size();
+  };
 
-  for (const auto &res : results) {
-    if (res.write_time > max_write_time) max_write_time = res.write_time;
-    if (res.read_time > max_read_time) max_read_time = res.read_time;
-    if (!res.success) all_success = false;
-  }
+  double avg_write_time = calc_mean(all_write_times);
+  double avg_read_time = calc_mean(all_read_times);
+  double min_write_time = *std::min_element(all_write_times.begin(), all_write_times.end());
+  double max_write_time = *std::max_element(all_write_times.begin(), all_write_times.end());
+  double min_read_time = *std::min_element(all_read_times.begin(), all_read_times.end());
+  double max_read_time = *std::max_element(all_read_times.begin(), all_read_times.end());
 
-  if (all_success) {
-    // output the benchmark result
-    const std::string report = "log/h5gds_benchmark.csv";
-    const boost::filesystem::path previous(report);
-    boost::system::error_code err;
-    const auto exist = boost::filesystem::exists(previous, err);
+  std::cout << "\n=== Statistics over " << iterations << " iteration(s) ===" << std::endl;
+  std::cout << "Write: avg=" << avg_write_time << "s, min=" << min_write_time << "s, max=" << max_write_time << "s" << std::endl;
+  std::cout << "Read:  avg=" << avg_read_time << "s, min=" << min_read_time << "s, max=" << max_read_time << "s" << std::endl;
+
+  // output the benchmark result
+  const std::string report = "log/h5gds_benchmark.csv";
+  const boost::filesystem::path previous(report);
+  boost::system::error_code err;
+  const auto exist = boost::filesystem::exists(previous, err);
 
     // write header if report is a new file
     std::ofstream output(report, std::ios::app);
@@ -472,15 +537,19 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
       output << "N";
       output << ",threads";
       output << ",VFD";
+      output << ",iterations";
       output << ",data size [byte]";
       output << ",copy buffer size [byte]";
       output << ",file block size [byte]";
       output << ",memory boundary [byte]";
-      output << ",latency (write) [s]";
-      output << ",latency (read) [s]";
-      output << ",bandwidth (write) [byte/s]";
-      output << ",bandwidth (read) [byte/s]";
-      output << ",filename";
+      output << ",latency (write avg) [s]";
+      output << ",latency (write min) [s]";
+      output << ",latency (write max) [s]";
+      output << ",latency (read avg) [s]";
+      output << ",latency (read min) [s]";
+      output << ",latency (read max) [s]";
+      output << ",bandwidth (write avg) [byte/s]";
+      output << ",bandwidth (read avg) [byte/s]";
       output << std::endl;
     }
 
@@ -489,6 +558,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     output << num;
     output << "," << num_threads;
     output << "," << vfd_name;
+    output << "," << iterations;
     const auto datasize = static_cast<double>(num) * static_cast<double>(sizeof(std::remove_reference_t<decltype(*idx)>) + sizeof(std::remove_reference_t<decltype(*pos)>) + sizeof(std::remove_reference_t<decltype(*vel_xy)>) + sizeof(std::remove_reference_t<decltype(*vel_z)>));
     // Total data size processed is datasize * num_threads? 
     // Usually throughput is Total Bytes / Time.
@@ -501,17 +571,16 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     output << "," << cbuf;
     output << "," << fblk;
     output << "," << memb;
+    output << "," << avg_write_time;
+    output << "," << min_write_time;
     output << "," << max_write_time;
+    output << "," << avg_read_time;
+    output << "," << min_read_time;
     output << "," << max_read_time;
-    output << "," << total_datasize / max_write_time;
-    output << "," << total_datasize / max_read_time;
-    output << "," << "multi-threaded";
+    output << "," << total_datasize / avg_write_time;
+    output << "," << total_datasize / avg_read_time;
     output << std::endl;
     output.close();
-  } else {
-    std::cerr << "ERROR: One or more threads failed verification." << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
 
   release_particles(pos, vel_xy, vel_z, idx);
 
