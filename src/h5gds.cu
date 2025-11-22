@@ -170,7 +170,8 @@ void worker_write(
     H5Fflush(target, H5F_SCOPE_GLOBAL);
     
     // Force sync BEFORE closing to ensure fair comparison (measure disk I/O, not RAM copy)
-    if (force_sync) {
+    // Only needed for SEC2 - DIRECT and GDS already bypass page cache
+    if (force_sync && vfd_name == "sec2") {
       // Get the file descriptor from the VFD layer before closing
       int fd = open(name.c_str(), O_RDONLY);
       if (fd >= 0) {

@@ -183,6 +183,31 @@
             display: none;
         }
 
+        .checkbox-group {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .checkbox-item input[type="checkbox"] {
+            display: block;
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .checkbox-item label {
+            margin: 0;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
         @media (max-width: 768px) {
             .charts-grid {
                 grid-template-columns: 1fr;
@@ -207,6 +232,23 @@
         </div>
 
         <div class="controls" id="controls">
+            <div class="filter-group">
+                <label>Select VFD Modes:</label>
+                <div class="checkbox-group">
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="vfdGds" value="gds" checked>
+                        <label for="vfdGds">GDS</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="vfdSec2" value="sec2" checked>
+                        <label for="vfdSec2">SEC2</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="vfdDirect" value="direct" checked>
+                        <label for="vfdDirect">DIRECT</label>
+                    </div>
+                </div>
+            </div>
             <div class="filter-group">
                 <label>Filter by Threads:</label>
                 <select id="threadFilter">
@@ -327,11 +369,14 @@
         function calculateStats() {
             const gdsData = benchmarkData.filter(d => d.VFD === 'gds');
             const sec2Data = benchmarkData.filter(d => d.VFD === 'sec2');
+            const directData = benchmarkData.filter(d => d.VFD === 'direct');
 
             const avgGdsWrite = gdsData.reduce((sum, d) => sum + d['bandwidth (write avg) [byte/s]'], 0) / gdsData.length;
             const avgGdsRead = gdsData.reduce((sum, d) => sum + d['bandwidth (read avg) [byte/s]'], 0) / gdsData.length;
             const avgSec2Write = sec2Data.reduce((sum, d) => sum + d['bandwidth (write avg) [byte/s]'], 0) / sec2Data.length;
             const avgSec2Read = sec2Data.reduce((sum, d) => sum + d['bandwidth (read avg) [byte/s]'], 0) / sec2Data.length;
+            const avgDirectWrite = directData.length ? directData.reduce((sum, d) => sum + d['bandwidth (write avg) [byte/s]'], 0) / directData.length : 0;
+            const avgDirectRead = directData.length ? directData.reduce((sum, d) => sum + d['bandwidth (read avg) [byte/s]'], 0) / directData.length : 0;
 
             const speedupWrite = (avgGdsWrite / avgSec2Write).toFixed(2);
             const speedupRead = (avgGdsRead / avgSec2Read).toFixed(2);
@@ -368,6 +413,14 @@
             });
         }
 
+        function getSelectedVFDs() {
+            const selected = [];
+            if (document.getElementById('vfdGds').checked) selected.push('gds');
+            if (document.getElementById('vfdSec2').checked) selected.push('sec2');
+            if (document.getElementById('vfdDirect').checked) selected.push('direct');
+            return selected;
+        }
+
         function updateCharts() {
             const data = getFilteredData();
             createBandwidthVsFileSizeChart(data, 'write');
@@ -380,15 +433,42 @@
 
         function createBandwidthVsFileSizeChart(data, type) {
             const ctx = document.getElementById(`${type}BandwidthChart`).getContext('2d');
+            const selectedVFDs = getSelectedVFDs();
             
             const fileSizes = [...new Set(data.map(d => d.N))].sort((a, b) => a - b);
-            const gdsData = fileSizes.map(n => {
-                const rows = data.filter(d => d.N === n && d.VFD === 'gds');
-                return rows.length ? rows.reduce((sum, d) => sum + d[`bandwidth (${type} avg) [byte/s]`], 0) / rows.length : null;
-            });
-            const sec2Data = fileSizes.map(n => {
-                const rows = data.filter(d => d.N === n && d.VFD === 'sec2');
-                return rows.length ? rows.reduce((sum, d) => sum + d[`bandwidth (${type} avg) [byte/s]`], 0) / rows.length : null;
+            
+            const vfdConfigs = {
+                'gds': {
+                    label: 'GDS',
+                    borderColor: '#667eea',
+                    backgroundColor: 'rgba(102, 126, 234, 0.1)'
+                },
+                'sec2': {
+                    label: 'SEC2',
+                    borderColor: '#f56565',
+                    backgroundColor: 'rgba(245, 101, 101, 0.1)'
+                },
+                'direct': {
+                    label: 'DIRECT',
+                    borderColor: '#48bb78',
+                    backgroundColor: 'rgba(72, 187, 120, 0.1)'
+                }
+            };
+
+            const datasets = selectedVFDs.map(vfd => {
+                const vfdData = fileSizes.map(n => {
+                    const rows = data.filter(d => d.N === n && d.VFD === vfd);
+                    return rows.length ? rows.reduce((sum, d) => sum + d[`bandwidth (${type} avg) [byte/s]`], 0) / rows.length : null;
+                });
+                
+                return {
+                    label: vfdConfigs[vfd].label,
+                    data: vfdData.map(d => d / 1e9),
+                    borderColor: vfdConfigs[vfd].borderColor,
+                    backgroundColor: vfdConfigs[vfd].backgroundColor,
+                    tension: 0.4,
+                    borderWidth: 3
+                };
             });
 
             if (charts[`${type}Bandwidth`]) charts[`${type}Bandwidth`].destroy();
@@ -397,21 +477,7 @@
                 type: 'line',
                 data: {
                     labels: fileSizes.map(n => (n / 1e6).toFixed(1) + 'M'),
-                    datasets: [{
-                        label: 'GDS',
-                        data: gdsData.map(d => d / 1e9),
-                        borderColor: '#667eea',
-                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                        tension: 0.4,
-                        borderWidth: 3
-                    }, {
-                        label: 'SEC2',
-                        data: sec2Data.map(d => d / 1e9),
-                        borderColor: '#f56565',
-                        backgroundColor: 'rgba(245, 101, 101, 0.1)',
-                        tension: 0.4,
-                        borderWidth: 3
-                    }]
+                    datasets: datasets
                 },
                 options: {
                     responsive: true,
@@ -433,15 +499,36 @@
 
         function createBandwidthVsBlockSizeChart(data, type) {
             const ctx = document.getElementById(`${type}BlockChart`).getContext('2d');
+            const selectedVFDs = getSelectedVFDs();
             
             const blockSizes = [...new Set(data.map(d => d['file block size [byte]']))].sort((a, b) => a - b);
-            const gdsData = blockSizes.map(b => {
-                const rows = data.filter(d => d['file block size [byte]'] === b && d.VFD === 'gds');
-                return rows.length ? rows.reduce((sum, d) => sum + d[`bandwidth (${type} avg) [byte/s]`], 0) / rows.length : null;
-            });
-            const sec2Data = blockSizes.map(b => {
-                const rows = data.filter(d => d['file block size [byte]'] === b && d.VFD === 'sec2');
-                return rows.length ? rows.reduce((sum, d) => sum + d[`bandwidth (${type} avg) [byte/s]`], 0) / rows.length : null;
+            
+            const vfdConfigs = {
+                'gds': {
+                    label: 'GDS',
+                    backgroundColor: 'rgba(102, 126, 234, 0.8)'
+                },
+                'sec2': {
+                    label: 'SEC2',
+                    backgroundColor: 'rgba(245, 101, 101, 0.8)'
+                },
+                'direct': {
+                    label: 'DIRECT',
+                    backgroundColor: 'rgba(72, 187, 120, 0.8)'
+                }
+            };
+
+            const datasets = selectedVFDs.map(vfd => {
+                const vfdData = blockSizes.map(b => {
+                    const rows = data.filter(d => d['file block size [byte]'] === b && d.VFD === vfd);
+                    return rows.length ? rows.reduce((sum, d) => sum + d[`bandwidth (${type} avg) [byte/s]`], 0) / rows.length : null;
+                });
+                
+                return {
+                    label: vfdConfigs[vfd].label,
+                    data: vfdData.map(d => d / 1e9),
+                    backgroundColor: vfdConfigs[vfd].backgroundColor
+                };
             });
 
             if (charts[`${type}Block`]) charts[`${type}Block`].destroy();
@@ -450,15 +537,7 @@
                 type: 'bar',
                 data: {
                     labels: blockSizes.map(b => b >= 1048576 ? (b / 1048576) + 'MB' : (b / 1024) + 'KB'),
-                    datasets: [{
-                        label: 'GDS',
-                        data: gdsData.map(d => d / 1e9),
-                        backgroundColor: 'rgba(102, 126, 234, 0.8)',
-                    }, {
-                        label: 'SEC2',
-                        data: sec2Data.map(d => d / 1e9),
-                        backgroundColor: 'rgba(245, 101, 101, 0.8)',
-                    }]
+                    datasets: datasets
                 },
                 options: {
                     responsive: true,
@@ -480,15 +559,42 @@
 
         function createThreadScalabilityChart(data, type) {
             const ctx = document.getElementById(`thread${type.charAt(0).toUpperCase() + type.slice(1)}Chart`).getContext('2d');
+            const selectedVFDs = getSelectedVFDs();
             
             const threads = [...new Set(data.map(d => d.threads))].sort((a, b) => a - b);
-            const gdsData = threads.map(t => {
-                const rows = data.filter(d => d.threads === t && d.VFD === 'gds');
-                return rows.length ? rows.reduce((sum, d) => sum + d[`bandwidth (${type} avg) [byte/s]`], 0) / rows.length : null;
-            });
-            const sec2Data = threads.map(t => {
-                const rows = data.filter(d => d.threads === t && d.VFD === 'sec2');
-                return rows.length ? rows.reduce((sum, d) => sum + d[`bandwidth (${type} avg) [byte/s]`], 0) / rows.length : null;
+            
+            const vfdConfigs = {
+                'gds': {
+                    label: 'GDS',
+                    borderColor: '#667eea',
+                    backgroundColor: 'rgba(102, 126, 234, 0.1)'
+                },
+                'sec2': {
+                    label: 'SEC2',
+                    borderColor: '#f56565',
+                    backgroundColor: 'rgba(245, 101, 101, 0.1)'
+                },
+                'direct': {
+                    label: 'DIRECT',
+                    borderColor: '#48bb78',
+                    backgroundColor: 'rgba(72, 187, 120, 0.1)'
+                }
+            };
+
+            const datasets = selectedVFDs.map(vfd => {
+                const vfdData = threads.map(t => {
+                    const rows = data.filter(d => d.threads === t && d.VFD === vfd);
+                    return rows.length ? rows.reduce((sum, d) => sum + d[`bandwidth (${type} avg) [byte/s]`], 0) / rows.length : null;
+                });
+                
+                return {
+                    label: vfdConfigs[vfd].label,
+                    data: vfdData.map(d => d / 1e9),
+                    borderColor: vfdConfigs[vfd].borderColor,
+                    backgroundColor: vfdConfigs[vfd].backgroundColor,
+                    tension: 0.4,
+                    borderWidth: 3
+                };
             });
 
             if (charts[`thread${type.charAt(0).toUpperCase() + type.slice(1)}`]) {
@@ -499,21 +605,7 @@
                 type: 'line',
                 data: {
                     labels: threads,
-                    datasets: [{
-                        label: 'GDS',
-                        data: gdsData.map(d => d / 1e9),
-                        borderColor: '#667eea',
-                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                        tension: 0.4,
-                        borderWidth: 3
-                    }, {
-                        label: 'SEC2',
-                        data: sec2Data.map(d => d / 1e9),
-                        borderColor: '#f56565',
-                        backgroundColor: 'rgba(245, 101, 101, 0.1)',
-                        tension: 0.4,
-                        borderWidth: 3
-                    }]
+                    datasets: datasets
                 },
                 options: {
                     responsive: true,
