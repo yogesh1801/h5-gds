@@ -160,22 +160,23 @@ void worker_write(
     h5write.commit(hdf5_dataspace_N, target, "vel_z", util::hdf5::h5type(*vel_z), vel_z);
   }
 
-  // execute H5Dwrite_multi()
-  result.write_time = benchmark([&h5write]() { h5write.execute(); });
+  // execute H5Dwrite_multi() and ensure data hits the disk
+  result.write_time = benchmark([&]() {
+    h5write.execute();
 
-  // write attribute
-  util::hdf5::write_attr(hdf5_dataspace_1, target, "num", &num);
-  H5Fflush(target, H5F_SCOPE_GLOBAL);
-  H5Fclose(target);
-  H5Pclose(fapl);
+    // write attribute
+    util::hdf5::write_attr(hdf5_dataspace_1, target, "num", &num);
+    H5Fflush(target, H5F_SCOPE_GLOBAL);
+    H5Fclose(target);
+    H5Pclose(fapl);
 
-  // Force sync
-  // sync(); // Removed to reduce system-wide I/O interference
-  int fd = open(name.c_str(), O_RDONLY);
-  if (fd >= 0) {
-    fsync(fd);
-    close(fd);
-  }
+    // Force sync to ensure fair comparison (measure disk I/O, not RAM copy)
+    int fd = open(name.c_str(), O_RDONLY);
+    if (fd >= 0) {
+      fsync(fd);
+      close(fd);
+    }
+  });
 
   // Cleanup dataspaces
   util::hdf5::close_dataspace(hdf5_dataspace_N);
