@@ -169,10 +169,9 @@ void worker_write(
     util::hdf5::write_attr(hdf5_dataspace_1, target, "num", &num);
     H5Fflush(target, H5F_SCOPE_GLOBAL);
     
-    // Force sync BEFORE closing to ensure fair comparison (measure disk I/O, not RAM copy)
-    // Only needed for SEC2 - DIRECT and GDS already bypass page cache
-    if (force_sync && vfd_name == "sec2") {
-      // Get the file descriptor from the VFD layer before closing
+    // Force physical disk write when --force flag is set
+    // Ensures consistent benchmarking methodology across all VFDs
+    if (force_sync) {
       int fd = open(name.c_str(), O_RDONLY);
       if (fd >= 0) {
         fsync(fd);
