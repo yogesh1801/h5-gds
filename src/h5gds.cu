@@ -108,11 +108,7 @@ void worker_task(
     return (std::fma(1.0e-9, static_cast<double>(end.tv_nsec - ini.tv_nsec), end.tv_sec - ini.tv_sec));
   };
 
-  // prepare dataspaces for HDF5 - these are lightweight handles
-  // Note: HDF5 IDs are not thread-safe by default in all versions, but we assume thread-safe HDF5 build or serialized access.
-  // However, creating dataspaces is local.
-  util::hdf5::create_h5t_real2();
-  util::hdf5::create_h5t_real4();
+  // prepare dataspaces for HDF5 - these are thread-local and safe
   const auto hdf5_dataspace_N = util::hdf5::setup_dataspace(num);
   const auto hdf5_dataspace_1 = util::hdf5::setup_dataspace();
   const auto [hdf5_dataspace_Nx3, hdf5_dataspace_Nx2, hdf5_dataspace_Nx1, hdf5_dataspace_Nx2_3, hdf5_dataspace_Nx1_3, hdf5_dataspace_Nx4, hdf5_dataspace_Nx3_4, hdf5_dataspace_Nx1_4] = util::hdf5::prepare_hyperslab_Nx3(num);
@@ -216,7 +212,7 @@ void worker_task(
   H5Fclose(target);
   H5Pclose(fapl);
 
-  // Cleanup dataspaces
+  // Cleanup dataspaces (thread-local resources)
   util::hdf5::close_dataspace(hdf5_dataspace_N);
   util::hdf5::close_dataspace(hdf5_dataspace_1);
   util::hdf5::close_dataspace(hdf5_dataspace_Nx1_3);
@@ -227,8 +223,6 @@ void worker_task(
   util::hdf5::close_dataspace(hdf5_dataspace_Nx1_4);
   util::hdf5::close_dataspace(hdf5_dataspace_Nx3_4);
   util::hdf5::close_dataspace(hdf5_dataspace_Nx4);
-  util::hdf5::remove_h5t_real2();
-  util::hdf5::remove_h5t_real4();
 
   // Verification
   bool local_success = skip ? true : (thrust::equal(thrust::device, (thrust::device_ptr<std::remove_reference_t<decltype(*idx)>>)idx, (thrust::device_ptr<std::remove_reference_t<decltype(*idx)>>)(idx + num), (thrust::device_ptr<std::remove_reference_t<decltype(*idx_read)>>)idx_read) && thrust::equal(thrust::device, (thrust::device_ptr<std::remove_reference_t<decltype(*pos)>>)pos, (thrust::device_ptr<std::remove_reference_t<decltype(*pos)>>)(pos + num), (thrust::device_ptr<std::remove_reference_t<decltype(*pos_read)>>)pos_read, compare_pos()) && thrust::equal(thrust::device, (thrust::device_ptr<std::remove_reference_t<decltype(*vel_xy)>>)vel_xy, (thrust::device_ptr<std::remove_reference_t<decltype(*vel_xy)>>)(vel_xy + num), (thrust::device_ptr<std::remove_reference_t<decltype(*vel_xy_read)>>)vel_xy_read, compare_vel_xy()) && thrust::equal(thrust::device, (thrust::device_ptr<std::remove_reference_t<decltype(*vel_z)>>)vel_z, (thrust::device_ptr<std::remove_reference_t<decltype(*vel_z)>>)(vel_z + num), (thrust::device_ptr<std::remove_reference_t<decltype(*vel_z_read)>>)vel_z_read));
@@ -310,6 +304,11 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   // initialize data on GPU
   set_uniform_sphere(num, pos, vel_xy, vel_z, idx, mass, radius, virial, newton);
 
+  // Initialize HDF5 compound types ONCE in main thread before spawning workers
+  // This prevents race conditions where multiple threads try to create the same type definitions
+  util::hdf5::create_h5t_real2();
+  util::hdf5::create_h5t_real4();
+
   std::vector<std::thread> threads;
   std::vector<WorkerResult> results(num_threads);
 
@@ -322,6 +321,10 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   for (auto &t : threads) {
     t.join();
   }
+
+  // Cleanup HDF5 compound types after all threads have completed
+  util::hdf5::remove_h5t_real2();
+  util::hdf5::remove_h5t_real4();
 
   // Aggregate results
   double max_write_time = 0.0;
