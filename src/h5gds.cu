@@ -103,11 +103,9 @@ void worker_write(
   result.filename = name;
 
   constexpr auto benchmark = [](const auto func) noexcept(false) {
-    cudaDeviceSynchronize(); 
     struct timespec ini;
     clock_gettime(CLOCK_MONOTONIC, &ini);
     func();
-    cudaDeviceSynchronize();
     struct timespec end;
     clock_gettime(CLOCK_MONOTONIC, &end);
     return (std::fma(1.0e-9, static_cast<double>(end.tv_nsec - ini.tv_nsec), end.tv_sec - ini.tv_sec));
@@ -290,10 +288,13 @@ void worker_read(
     h5read.commit(target, "vel_z", util::hdf5::h5type(*vel_z_read), vel_z_read);
   }
 
-  result.read_time = benchmark([&h5read]() { h5read.execute(); });
-
-  H5Fclose(target);
-  H5Pclose(fapl);
+  // Move H5Fclose inside timing for consistency with write phase
+  // (write phase times H5Dwrite + H5Fflush + fsync + H5Fclose)
+  result.read_time = benchmark([&]() { 
+    h5read.execute();
+    H5Fclose(target);
+    H5Pclose(fapl);
+  });
 
   // Cleanup dataspaces
   util::hdf5::close_dataspace(hdf5_dataspace_N);
@@ -412,6 +413,34 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   util::hdf5::create_h5t_real4();
 
   // ===============================================
+  // WARMUP ITERATION (excluded from statistics)
+  // ===============================================
+  std::cout << "Running warmup iteration to initialize libraries (HDF5, CUDA)..." << std::endl;
+  {
+    std::vector<WorkerResult> warmup_results(num_threads);
+    
+    // Warmup write phase
+    std::vector<std::thread> warmup_write_threads;
+    for (int i = 0; i < num_threads; ++i) {
+      warmup_write_threads.emplace_back(worker_write, i, num, cbuf, fblk, memb, asis, write_xdmf, vfd_name, force_sync, idx, pos, vel_xy, vel_z, std::ref(warmup_results[i]));
+    }
+    for (auto &t : warmup_write_threads) {
+      t.join();
+    }
+    
+    // Warmup read phase
+    std::vector<std::thread> warmup_read_threads;
+    for (int i = 0; i < num_threads; ++i) {
+      warmup_read_threads.emplace_back(worker_read, i, num, cbuf, fblk, memb, skip, asis, vfd_name, idx, pos, vel_xy, vel_z, std::ref(warmup_results[i]));
+    }
+    for (auto &t : warmup_read_threads) {
+      t.join();
+    }
+    
+    std::cout << "Warmup completed (not included in statistics)\n" << std::endl;
+  }
+
+  // ===============================================
   // MULTIPLE ITERATIONS FOR STATISTICAL AVERAGING
   // ===============================================
   std::vector<double> all_write_times;
@@ -419,7 +448,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   all_write_times.reserve(iterations);
   all_read_times.reserve(iterations);
 
-  std::cout << "Running " << iterations << " iteration(s) for statistical averaging..." << std::endl;
+  std::cout << "Running " << iterations << " benchmark iteration(s) for statistical averaging..." << std::endl;
 
   for (int iter = 0; iter < iterations; ++iter) {
     if (iterations > 1) {
