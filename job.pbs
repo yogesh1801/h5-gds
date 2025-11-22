@@ -13,7 +13,7 @@
 NUM_VALUES=(1000000 5000000 10000000 32000000 64000000 128000000)
 
 # Block sizes in bytes
-FBLK_VALUES=(524288 1048576 2097152 4194304 8388608)  # 512KB, 1MB, 2MB, 4MB, 8MB
+FBLK_VALUES=(524288 1048576 2097152 4194304 8388608 16777216 33554432)  # 512KB, 1MB, 2MB, 4MB, 8MB, 16MB
 
 # Thread counts
 THREAD_VALUES=(1 2 4)
@@ -48,10 +48,14 @@ export CPATH=/work/jh250079/n14001/vfd-gds/src:$CPATH
 export LD_LIBRARY_PATH=/work/jh250079/n14001/vfd-gds/build/bin:$LD_LIBRARY_PATH
 export HDF5_PLUGIN_PATH=/work/jh250079/n14001/h5-gds/build/bin/
 
+# Set cuFile configuration for GDS
+export CUFILE_ENV_PATH_JSON=${PBS_O_WORKDIR}/cufile.json
+
 echo "=== Environment Configuration ==="
 echo "HDF5_HOME: $HDF5_HOME"
 echo "HDF5_PLUGIN_PATH: $HDF5_PLUGIN_PATH"
 echo "CUDA_HOME: $CUDA_HOME"
+echo "CUFILE_ENV_PATH_JSON: $CUFILE_ENV_PATH_JSON"
 echo ""
 
 # Start timestamp

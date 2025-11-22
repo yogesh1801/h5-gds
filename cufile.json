@@ -1,0 +1,14 @@
+{
+    "properties": {
+        "use_compat_mode": false,
+        "force_compat_mode": false
+    },
+    "execution": {
+        "max_io_threads": 8,
+        "max_io_queue_depth": 128,
+        "parallel_io": true,
+        "min_io_threshold_size_kb": 8192,
+        "max_request_parallelism": 4,
+        "total_threads": 32
+    }
+}

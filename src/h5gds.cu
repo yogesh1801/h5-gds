@@ -170,7 +170,7 @@ void worker_write(
   H5Pclose(fapl);
 
   // Force sync
-  sync();
+  // sync(); // Removed to reduce system-wide I/O interference
   int fd = open(name.c_str(), O_RDONLY);
   if (fd >= 0) {
     fsync(fd);
