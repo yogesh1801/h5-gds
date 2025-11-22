@@ -86,6 +86,7 @@ void worker_write(
     bool asis,
     bool write_xdmf,
     const std::string &vfd_name,
+    bool force_sync,
     type::idx *idx,
     type::pos *pos,
     type::vel_xy *vel_xy,
@@ -167,15 +168,19 @@ void worker_write(
     // write attribute
     util::hdf5::write_attr(hdf5_dataspace_1, target, "num", &num);
     H5Fflush(target, H5F_SCOPE_GLOBAL);
+    
+    // Force sync BEFORE closing to ensure fair comparison (measure disk I/O, not RAM copy)
+    if (force_sync) {
+      // Get the file descriptor from the VFD layer before closing
+      int fd = open(name.c_str(), O_RDONLY);
+      if (fd >= 0) {
+        fsync(fd);
+        close(fd);
+      }
+    }
+    
     H5Fclose(target);
     H5Pclose(fapl);
-
-    // Force sync to ensure fair comparison (measure disk I/O, not RAM copy)
-    int fd = open(name.c_str(), O_RDONLY);
-    if (fd >= 0) {
-      fsync(fd);
-      close(fd);
-    }
   });
 
   // Cleanup dataspaces
@@ -341,6 +346,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
       "threads", boost::program_options::value<int>()->default_value(1), "number of concurrent threads")(
       "vfd", boost::program_options::value<std::string>()->default_value("gds"), "VFD to use: gds (GPUDirect Storage), sec2 (POSIX unbuffered), direct (O_DIRECT)")(
       "iterations", boost::program_options::value<int>()->default_value(3), "number of benchmark iterations to average (reduces variance)")(
+      "force", boost::program_options::bool_switch()->default_value(false), "force physical disk write (fsync) for fair storage benchmarking")(
       "help,h", "Help");
   // read input arguments
   boost::program_options::variables_map vm;
@@ -364,6 +370,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   const auto num_threads = vm["threads"].as<int>();
   const auto vfd_name = vm["vfd"].as<std::string>();
   const auto iterations = vm["iterations"].as<int>();
+  const auto force_sync = vm["force"].as<bool>();
   vm.clear();
 
   // Validate iterations
@@ -428,7 +435,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     
     std::vector<std::thread> write_threads;
     for (int i = 0; i < num_threads; ++i) {
-      write_threads.emplace_back(worker_write, i, num, cbuf, fblk, memb, asis, write_xdmf, vfd_name, idx, pos, vel_xy, vel_z, std::ref(results[i]));
+      write_threads.emplace_back(worker_write, i, num, cbuf, fblk, memb, asis, write_xdmf, vfd_name, force_sync, idx, pos, vel_xy, vel_z, std::ref(results[i]));
     }
 
     // Join write threads
