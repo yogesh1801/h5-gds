@@ -66,38 +66,40 @@ struct WorkerResult {
   double write_time;
   double read_time;
   bool success;
+  std::string filename;  // Store filename to share between write and read phases
 };
 
 std::mutex cout_mutex;
 
-void worker_task(
+
+///
+/// @brief Worker function for WRITE phase: creates and writes HDF5 file
+///
+void worker_write(
     int thread_id,
     type::idx num,
     size_t cbuf,
     size_t fblk,
     size_t memb,
-    bool skip,
     bool asis,
     bool write_xdmf,
+    const std::string &vfd_name,
     type::idx *idx,
     type::pos *pos,
     type::vel_xy *vel_xy,
     type::vel_z *vel_z,
     WorkerResult &result) {
   
-  // Each thread needs its own HDF5 context setup if necessary, but HDF5 library handles most.
-  // However, we need to be careful with CUDA context. 
-  // Since we are using the same device (0) for all threads as per original code:
   cudaSetDevice(0);
 
   auto uuid = boost::uuids::random_generator{}();
   const auto series = boost::lexical_cast<std::string>(uuid);
-  // Append thread ID to filename to ensure uniqueness even if UUID fails (unlikely) or for clarity
   auto name = "dat/" + series + "_" + std::to_string(thread_id) + ".h5";
+  
+  // Store filename for read phase
+  result.filename = name;
 
   constexpr auto benchmark = [](const auto func) noexcept(false) {
-    // Note: cudaDeviceSynchronize is device-wide, so it syncs all streams.
-    // In a multi-threaded environment sharing a device, this syncs everything.
     cudaDeviceSynchronize(); 
     struct timespec ini;
     clock_gettime(CLOCK_MONOTONIC, &ini);
@@ -114,13 +116,24 @@ void worker_task(
   const auto [hdf5_dataspace_Nx3, hdf5_dataspace_Nx2, hdf5_dataspace_Nx1, hdf5_dataspace_Nx2_3, hdf5_dataspace_Nx1_3, hdf5_dataspace_Nx4, hdf5_dataspace_Nx3_4, hdf5_dataspace_Nx1_4] = util::hdf5::prepare_hyperslab_Nx3(num);
   
   auto h5write = util::hdf5::h5multi_write{};
-  auto h5read = util::hdf5::h5multi_read{};
   h5write.allocate(5);
-  h5read.allocate(5);
 
-  // prepare to use GPUDirect Storage via HDF5 with VFD
+  // Configure File Access Property List based on selected VFD
   auto fapl = H5Pcreate(H5P_FILE_ACCESS);
-  H5Pset_fapl_gds(fapl, memb, fblk, cbuf);
+  
+  if (vfd_name == "gds") {
+    H5Pset_fapl_gds(fapl, memb, fblk, cbuf);
+  } else if (vfd_name == "sec2") {
+    H5Pset_fapl_sec2(fapl);
+  } else if (vfd_name == "direct") {
+    constexpr size_t alignment = 512;
+    H5Pset_fapl_direct(fapl, alignment, fblk, cbuf);
+  } else {
+    std::lock_guard<std::mutex> lock(cout_mutex);
+    std::cerr << "Thread " << thread_id << ": Unknown VFD: " << vfd_name << std::endl;
+    result.success = false;
+    return;
+  }
 
   // create HDF5 file
   auto target = H5Fcreate(name.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
@@ -152,6 +165,7 @@ void worker_task(
   util::hdf5::write_attr(hdf5_dataspace_1, target, "num", &num);
   H5Fflush(target, H5F_SCOPE_GLOBAL);
   H5Fclose(target);
+  H5Pclose(fapl);
 
   // Force sync
   sync();
@@ -161,22 +175,83 @@ void worker_task(
     close(fd);
   }
 
-  // generate XDMF file if requested (only for thread 0 to avoid clutter or all? Let's do all with unique names)
-  if (!asis && write_xdmf) {
-    std::ofstream xml("dat/" + series + "_" + std::to_string(thread_id) + ".xdmf", std::ios::out);
-    // ... (XDMF generation logic omitted for brevity/simplicity in threaded context, or copied if needed. 
-    // For now, let's keep it simple or copy the logic. The user asked for throughput, XDMF is secondary.
-    // I will include a simplified version or just skip to save code space if it's not critical, 
-    // but to be safe I'll leave it out or put a placeholder. 
-    // Actually, let's just skip XDMF in threaded mode to avoid complexity, or only do it for thread 0.)
+  // Cleanup dataspaces
+  util::hdf5::close_dataspace(hdf5_dataspace_N);
+  util::hdf5::close_dataspace(hdf5_dataspace_1);
+  util::hdf5::close_dataspace(hdf5_dataspace_Nx1_3);
+  util::hdf5::close_dataspace(hdf5_dataspace_Nx2_3);
+  util::hdf5::close_dataspace(hdf5_dataspace_Nx1);
+  util::hdf5::close_dataspace(hdf5_dataspace_Nx2);
+  util::hdf5::close_dataspace(hdf5_dataspace_Nx3);
+  util::hdf5::close_dataspace(hdf5_dataspace_Nx1_4);
+  util::hdf5::close_dataspace(hdf5_dataspace_Nx3_4);
+  util::hdf5::close_dataspace(hdf5_dataspace_Nx4);
+
+  result.success = true;
+}
+
+///
+/// @brief Worker function for READ phase: reads and verifies existing HDF5 file
+/// 
+void worker_read(
+    int thread_id,
+    type::idx num,
+    size_t cbuf,
+    size_t fblk,
+    size_t memb,
+    bool skip,
+    bool asis,
+    const std::string &vfd_name,
+    type::idx *idx,
+    type::pos *pos,
+    type::vel_xy *vel_xy,
+    type::vel_z *vel_z,
+    WorkerResult &result) {
+  
+  cudaSetDevice(0);
+
+  const auto &name = result.filename;  // Use filename from write phase
+
+  constexpr auto benchmark = [](const auto func) noexcept(false) {
+    cudaDeviceSynchronize(); 
+    struct timespec ini;
+    clock_gettime(CLOCK_MONOTONIC, &ini);
+    func();
+    cudaDeviceSynchronize();
+    struct timespec end;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    return (std::fma(1.0e-9, static_cast<double>(end.tv_nsec - ini.tv_nsec), end.tv_sec - ini.tv_sec));
+  };
+
+  // prepare dataspaces for HDF5
+  const auto hdf5_dataspace_N = util::hdf5::setup_dataspace(num);
+  const auto [hdf5_dataspace_Nx3, hdf5_dataspace_Nx2, hdf5_dataspace_Nx1, hdf5_dataspace_Nx2_3, hdf5_dataspace_Nx1_3, hdf5_dataspace_Nx4, hdf5_dataspace_Nx3_4, hdf5_dataspace_Nx1_4] = util::hdf5::prepare_hyperslab_Nx3(num);
+  
+  auto h5read = util::hdf5::h5multi_read{};
+  h5read.allocate(5);
+
+  // Configure VFD
+  auto fapl = H5Pcreate(H5P_FILE_ACCESS);
+  
+  if (vfd_name == "gds") {
+    H5Pset_fapl_gds(fapl, memb, fblk, cbuf);
+  } else if (vfd_name == "sec2") {
+    H5Pset_fapl_sec2(fapl);
+  } else if (vfd_name == "direct") {
+    constexpr size_t alignment = 512;
+    H5Pset_fapl_direct(fapl, alignment, fblk, cbuf);
+  } else {
+    std::lock_guard<std::mutex> lock(cout_mutex);
+    std::cerr << "Thread " << thread_id << ": Unknown VFD: " << vfd_name << std::endl;
+    result.success = false;
+    return;
   }
 
   cudaDeviceSynchronize();
   drop_file_cache(name);
-  // usleep(100000); // Optional delay
 
   // Read back
-  target = H5Fopen(name.c_str(), H5F_ACC_RDONLY, fapl);
+  auto target = H5Fopen(name.c_str(), H5F_ACC_RDONLY, fapl);
   if (target < 0) {
     std::lock_guard<std::mutex> lock(cout_mutex);
     std::cerr << "Thread " << thread_id << ": Failed to open HDF5 file: " << name << std::endl;
@@ -212,9 +287,8 @@ void worker_task(
   H5Fclose(target);
   H5Pclose(fapl);
 
-  // Cleanup dataspaces (thread-local resources)
+  // Cleanup dataspaces
   util::hdf5::close_dataspace(hdf5_dataspace_N);
-  util::hdf5::close_dataspace(hdf5_dataspace_1);
   util::hdf5::close_dataspace(hdf5_dataspace_Nx1_3);
   util::hdf5::close_dataspace(hdf5_dataspace_Nx2_3);
   util::hdf5::close_dataspace(hdf5_dataspace_Nx1);
@@ -231,6 +305,7 @@ void worker_task(
 
   release_particles(pos_read, vel_xy_read, vel_z_read, idx_read);
 
+  // Delete file after verification
   if (std::remove(name.c_str()) != 0) {
      // Warning ignored
   }
@@ -261,6 +336,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
       "mass", boost::program_options::value<std::remove_const_t<decltype(newton)>>()->default_value(1.0), "total mass of the system")(
       "xdmf", boost::program_options::bool_switch()->default_value(false), "generate XDMF file to visualize the snapshot")(
       "threads", boost::program_options::value<int>()->default_value(1), "number of concurrent threads")(
+      "vfd", boost::program_options::value<std::string>()->default_value("gds"), "VFD to use: gds (GPUDirect Storage), sec2 (POSIX unbuffered), direct (O_DIRECT)")(
       "help,h", "Help");
   // read input arguments
   boost::program_options::variables_map vm;
@@ -282,7 +358,15 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   const auto asis = vm["asis"].as<bool>();
   const auto write_xdmf = vm["xdmf"].as<bool>();
   const auto num_threads = vm["threads"].as<int>();
+  const auto vfd_name = vm["vfd"].as<std::string>();
   vm.clear();
+
+  // Validate VFD selection
+  if (vfd_name != "gds" && vfd_name != "sec2" && vfd_name != "direct") {
+    std::cerr << "ERROR: Invalid VFD '" << vfd_name << "'" << std::endl;
+    std::cerr << "Valid options: gds, sec2, direct" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // copy buffer size must be a multiple of block size
   if ((cbuf % fblk) != 0U) {
@@ -309,16 +393,54 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   util::hdf5::create_h5t_real2();
   util::hdf5::create_h5t_real4();
 
-  std::vector<std::thread> threads;
   std::vector<WorkerResult> results(num_threads);
 
-  // Launch threads
+  // ===============================================
+  // PHASE 1: WRITE BENCHMARK
+  // ===============================================
+  std::cout << "Phase 1: Write benchmark - " << num_threads << " threads writing..." << std::endl;
+  
+  std::vector<std::thread> write_threads;
   for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back(worker_task, i, num, cbuf, fblk, memb, skip, asis, write_xdmf, idx, pos, vel_xy, vel_z, std::ref(results[i]));
+    write_threads.emplace_back(worker_write, i, num, cbuf, fblk, memb, asis, write_xdmf, vfd_name, idx, pos, vel_xy, vel_z, std::ref(results[i]));
   }
 
-  // Join threads
-  for (auto &t : threads) {
+  // Join write threads
+  for (auto &t : write_threads) {
+    t.join();
+  }
+
+  // Check write phase success
+  bool write_success = true;
+  for (const auto &res : results) {
+    if (!res.success) {
+      write_success = false;
+      break;
+    }
+  }
+
+  if (!write_success) {
+    std::cerr << "ERROR: One or more threads failed during write phase." << std::endl;
+    util::hdf5::remove_h5t_real2();
+    util::hdf5::remove_h5t_real4();
+    release_particles(pos, vel_xy, vel_z, idx);
+    std::exit(EXIT_FAILURE);
+  }
+
+  std::cout << "Write phase completed successfully." << std::endl;
+
+  // ===============================================
+  // PHASE 2: READ BENCHMARK
+  // ===============================================
+  std::cout << "Phase 2: Read benchmark - " << num_threads << " threads reading..." << std::endl;
+
+  std::vector<std::thread> read_threads;
+  for (int i = 0; i < num_threads; ++i) {
+    read_threads.emplace_back(worker_read, i, num, cbuf, fblk, memb, skip, asis, vfd_name, idx, pos, vel_xy, vel_z, std::ref(results[i]));
+  }
+
+  // Join read threads
+  for (auto &t : read_threads) {
     t.join();
   }
 
@@ -349,6 +471,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     if (!exist || err) {
       output << "N";
       output << ",threads";
+      output << ",VFD";
       output << ",data size [byte]";
       output << ",copy buffer size [byte]";
       output << ",file block size [byte]";
@@ -365,6 +488,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     output << std::scientific;
     output << num;
     output << "," << num_threads;
+    output << "," << vfd_name;
     const auto datasize = static_cast<double>(num) * static_cast<double>(sizeof(std::remove_reference_t<decltype(*idx)>) + sizeof(std::remove_reference_t<decltype(*pos)>) + sizeof(std::remove_reference_t<decltype(*vel_xy)>) + sizeof(std::remove_reference_t<decltype(*vel_z)>));
     // Total data size processed is datasize * num_threads? 
     // Usually throughput is Total Bytes / Time.
