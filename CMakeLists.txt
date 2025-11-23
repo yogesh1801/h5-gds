@@ -9,6 +9,8 @@ option(BENCHMARK_MODE "On to perform benchmark" ON)
 message(STATUS "BENCHMARK_MODE is ${BENCHMARK_MODE}")
 option(USE_SYSTEM_MALLOC "On to use system-allocated memory for GPU (NVIDIA GH200 or similar architectures)" OFF)
 message(STATUS "USE_SYSTEM_MALLOC is ${USE_SYSTEM_MALLOC}")
+option(USE_MANAGED_MEMORY "On to use CUDA Managed Memory (Recommended for GH200)" OFF)
+message(STATUS "USE_MANAGED_MEMORY is ${USE_MANAGED_MEMORY}")
 
 # enforce Release as build type in benchmark mode
 if(BENCHMARK_MODE)
@@ -82,4 +84,8 @@ if(USE_SYSTEM_MALLOC)
   $<$<BOOL:${USE_SYSTEM_MALLOC}>:HOST_MALLOC_AND_FIRST_TOUCH>
   )
 endif(USE_SYSTEM_MALLOC)
+
+if(USE_MANAGED_MEMORY)
+  target_compile_definitions(${PROJECT_NAME} PUBLIC USE_MANAGED_MEMORY)
+endif(USE_MANAGED_MEMORY)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${NVIDIA_GPU_HARD})

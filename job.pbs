@@ -15,6 +15,10 @@ NUM_VALUES=(1000000 5000000 10000000 32000000 64000000 128000000)
 # Block sizes in bytes
 FBLK_VALUES=(524288 1048576 2097152 4194304 8388608 16777216 33554432)  # 512KB, 1MB, 2MB, 4MB, 8MB, 16MB
 
+# Copy buffer multipliers (cbuf = MULTIPLIER * fblk)
+# cbuf must be a multiple of fblk (enforced by h5gds validation)
+CBUF_MULTIPLIER_VALUES=(1 2 4 8 16)  # Test ratios: 1x, 2x, 4x, 8x, 16x
+
 # Thread counts
 THREAD_VALUES=(1 2 4)
 
@@ -113,7 +117,7 @@ echo ""
 # ============================================
 # PARAMETER SWEEP
 # ============================================
-TOTAL_RUNS=$((${#NUM_VALUES[@]} * ${#FBLK_VALUES[@]} * ${#THREAD_VALUES[@]} * ${#VFD_MODES[@]}))
+TOTAL_RUNS=$((${#NUM_VALUES[@]} * ${#FBLK_VALUES[@]} * ${#CBUF_MULTIPLIER_VALUES[@]} * ${#THREAD_VALUES[@]} * ${#VFD_MODES[@]}))
 CURRENT_RUN=0
 
 echo "=== Starting Parameter Sweep ==="
@@ -133,40 +137,45 @@ do
         # Loop over block sizes
         for FBLK in "${FBLK_VALUES[@]}"
         do
-            # Calculate copy buffer size (match block size)
-            CBUF=$FBLK
-            
-            # Loop over thread counts
-            for THREADS in "${THREAD_VALUES[@]}"
+            # Loop over copy buffer multipliers
+            for MULTIPLIER in "${CBUF_MULTIPLIER_VALUES[@]}"
             do
-                CURRENT_RUN=$((CURRENT_RUN + 1))
+                # Calculate copy buffer size (must be multiple of block size)
+                CBUF=$((FBLK * MULTIPLIER))
                 
-                echo ""
-                echo "--- Run ${CURRENT_RUN}/${TOTAL_RUNS} ---"
-                echo "VFD=$VFD, NUM=$NUM, FBLK=$FBLK, CBUF=$CBUF, THREADS=$THREADS, ITERATIONS=$ITERATIONS"
-                
-                # Run benchmark with NUMA affinity
-                timeout ${ELAPSE_MAX} numactl --cpunodebind=$NUMA_NODE --membind=$NUMA_NODE \
-                    bin/h5gds \
-                    --asis \
-                    --num $NUM \
-                    --fblk $FBLK \
-                    --cbuf $CBUF \
-                    --threads $THREADS \
-                    --vfd $VFD \
-                    --iterations $ITERATIONS
-                
-                EXIT_CODE=$?
-                if [ $EXIT_CODE -eq 124 ]; then
-                    echo "WARNING: Benchmark timed out after ${ELAPSE_MAX}"
-                elif [ $EXIT_CODE -ne 0 ]; then
-                    echo "ERROR: Benchmark failed with exit code $EXIT_CODE"
-                fi
-                
-                # Sync results to temp directory periodically
-                rsync -av log/ ${TEMP}/log/
-                
-            done  # THREADS loop
+                # Loop over thread counts
+                for THREADS in "${THREAD_VALUES[@]}"
+                do
+                    CURRENT_RUN=$((CURRENT_RUN + 1))
+                    
+                    echo ""
+                    echo "--- Run ${CURRENT_RUN}/${TOTAL_RUNS} ---"
+                    echo "VFD=$VFD, NUM=$NUM, FBLK=$FBLK, CBUF=$CBUF (${MULTIPLIER}x), THREADS=$THREADS, ITERATIONS=$ITERATIONS"
+                    
+                    # Run benchmark with NUMA affinity
+                    timeout ${ELAPSE_MAX} numactl --cpunodebind=$NUMA_NODE --membind=$NUMA_NODE \
+                        bin/h5gds \
+                        --asis \
+                        --num $NUM \
+                        --fblk $FBLK \
+                        --cbuf $CBUF \
+                        --threads $THREADS \
+                        --vfd $VFD \
+                        --iterations $ITERATIONS \
+                        --force
+                    
+                    EXIT_CODE=$?
+                    if [ $EXIT_CODE -eq 124 ]; then
+                        echo "WARNING: Benchmark timed out after ${ELAPSE_MAX}"
+                    elif [ $EXIT_CODE -ne 0 ]; then
+                        echo "ERROR: Benchmark failed with exit code $EXIT_CODE"
+                    fi
+                    
+                    # Sync results to temp directory periodically
+                    rsync -av log/ ${TEMP}/log/
+                    
+                done  # THREADS loop
+            done  # CBUF_MULTIPLIER loop
         done  # FBLK loop
     done  # NUM loop
     

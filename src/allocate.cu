@@ -49,6 +49,29 @@ void allocate_particles(type::pos **pos, type::vel_xy **vel_xy, type::vel_z **ve
   checkCudaErrors(cudaMemset(*vel_xy, 0, size * sizeof(std::remove_reference_t<decltype(**vel_xy)>)));
   checkCudaErrors(cudaMemset(*vel_z, 0, size * sizeof(std::remove_reference_t<decltype(**vel_z)>)));
   checkCudaErrors(cudaMemset(*idx, 0, size * sizeof(std::remove_reference_t<decltype(**idx)>)));
+#elif defined(USE_MANAGED_MEMORY)
+  checkCudaErrors(cudaMallocManaged((void **)pos, size * sizeof(std::remove_reference_t<decltype(**pos)>)));
+  checkCudaErrors(cudaMallocManaged((void **)vel_xy, size * sizeof(std::remove_reference_t<decltype(**vel_xy)>)));
+  checkCudaErrors(cudaMallocManaged((void **)vel_z, size * sizeof(std::remove_reference_t<decltype(**vel_z)>)));
+  checkCudaErrors(cudaMallocManaged((void **)idx, size * sizeof(std::remove_reference_t<decltype(**idx)>)));
+
+  // zero-clear arrays
+  checkCudaErrors(cudaMemset(*pos, 0, size * sizeof(std::remove_reference_t<decltype(**pos)>)));
+  checkCudaErrors(cudaMemset(*vel_xy, 0, size * sizeof(std::remove_reference_t<decltype(**vel_xy)>)));
+  checkCudaErrors(cudaMemset(*vel_z, 0, size * sizeof(std::remove_reference_t<decltype(**vel_z)>)));
+  checkCudaErrors(cudaMemset(*idx, 0, size * sizeof(std::remove_reference_t<decltype(**idx)>)));
+
+  // Prefetch to GPU device to ensure physical backing on HBM
+  int device = 0;
+  checkCudaErrors(cudaGetDevice(&device));
+  checkCudaErrors(cudaMemPrefetchAsync(*pos, size * sizeof(std::remove_reference_t<decltype(**pos)>), device, NULL));
+  checkCudaErrors(cudaMemPrefetchAsync(*vel_xy, size * sizeof(std::remove_reference_t<decltype(**vel_xy)>), device, NULL));
+  checkCudaErrors(cudaMemPrefetchAsync(*vel_z, size * sizeof(std::remove_reference_t<decltype(**vel_z)>), device, NULL));
+  checkCudaErrors(cudaMemPrefetchAsync(*idx, size * sizeof(std::remove_reference_t<decltype(**idx)>), device, NULL));
+  
+  // Synchronize to ensure prefetching is complete before use
+  checkCudaErrors(cudaDeviceSynchronize());
+
 #else   //! defined(HOST_MALLOC_AND_FIRST_TOUCH)
   *pos = (type::pos *)malloc(size * sizeof(std::remove_reference_t<decltype(**pos)>));
   if (*pos == nullptr) throw std::bad_alloc();
