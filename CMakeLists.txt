@@ -133,3 +133,35 @@ else()
 endif()
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${NVIDIA_GPU_HARD})
 
+# compile benchmark code: GPUDirect Storage via NetCDF-4
+project(nc4gds CXX CUDA)
+message(STATUS "Generate ${PROJECT_NAME} ...")
+
+# define the executable
+set(SOURCES ${PROJECT_SOURCE_DIR}/src/nc4gds.cu ${PROJECT_SOURCE_DIR}/src/allocate.cu ${PROJECT_SOURCE_DIR}/src/generate.cu)
+
+add_executable(${PROJECT_NAME}
+  ${SOURCES}
+)
+
+find_package(CUDA REQUIRED)
+find_package(CUDA_samples REQUIRED)
+
+# apply common settings
+include(${USER_MODULE_PATH}/apply_common_settings.cmake)
+
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE
+  ${CUDA_samples_INCLUDE_DIRS}
+)
+
+# Configure first-touch memory allocation mode (same as h5gds)
+if(FIRST_TOUCH_MODE STREQUAL "GPU")
+  target_compile_definitions(${PROJECT_NAME} PUBLIC HOST_MALLOC_AND_FIRST_TOUCH_GPU)
+  message(STATUS "nc4gds: Using host malloc with GPU first-touch")
+elseif(FIRST_TOUCH_MODE STREQUAL "CPU")
+  target_compile_definitions(${PROJECT_NAME} PUBLIC HOST_MALLOC_AND_FIRST_TOUCH_CPU)
+  message(STATUS "nc4gds: Using host malloc with CPU first-touch")
+else()
+  message(STATUS "nc4gds: Using standard cudaMalloc")
+endif()
+set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${NVIDIA_GPU_HARD})
