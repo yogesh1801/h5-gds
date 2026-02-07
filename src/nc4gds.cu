@@ -215,7 +215,8 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     NC_CHECK(nc_def_var(ncid, "id", NC_UINT64, 1, &dim_n, &var_id));
 
     // Write num as global attribute
-    NC_CHECK(nc_put_att_ulonglong(ncid, NC_GLOBAL, "num", NC_UINT64, 1, &num));
+    unsigned long long num_ull = static_cast<unsigned long long>(num);
+    NC_CHECK(nc_put_att_ulonglong(ncid, NC_GLOBAL, "num", NC_UINT64, 1, &num_ull));
 
     // End define mode
     NC_CHECK(nc_enddef(ncid));
@@ -224,7 +225,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     NC_CHECK(nc_put_var_float(ncid, var_pos, position_buf));
     NC_CHECK(nc_put_var_float(ncid, var_vel, velocity_buf));
     NC_CHECK(nc_put_var_float(ncid, var_mass, mass_buf));
-    NC_CHECK(nc_put_var_ulonglong(ncid, var_id, idx_write));
+    NC_CHECK(nc_put_var_ulonglong(ncid, var_id, reinterpret_cast<const unsigned long long*>(idx_write)));
 
     // Close file
     NC_CHECK(nc_close(ncid));
@@ -283,8 +284,9 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     NC_CHECK(nc_open(name.c_str(), NC_NOWRITE, &ncid));
 
     // Read num attribute and verify
-    type::idx num_read;
-    NC_CHECK(nc_get_att_ulonglong(ncid, NC_GLOBAL, "num", &num_read));
+    unsigned long long num_read_ull;
+    NC_CHECK(nc_get_att_ulonglong(ncid, NC_GLOBAL, "num", &num_read_ull));
+    type::idx num_read = static_cast<type::idx>(num_read_ull);
     if (num_read != num) {
       std::cerr << "num_read (" << num_read << ") does not match num (" << num << ")" << std::endl;
       std::exit(EXIT_FAILURE);
@@ -301,7 +303,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     NC_CHECK(nc_get_var_float(ncid, var_pos_r, position_read_buf));
     NC_CHECK(nc_get_var_float(ncid, var_vel_r, velocity_read_buf));
     NC_CHECK(nc_get_var_float(ncid, var_mass_r, mass_read_buf));
-    NC_CHECK(nc_get_var_ulonglong(ncid, var_id_r, idx_read_ptr));
+    NC_CHECK(nc_get_var_ulonglong(ncid, var_id_r, reinterpret_cast<unsigned long long*>(idx_read_ptr)));
 
     // Close file
     NC_CHECK(nc_close(ncid));
