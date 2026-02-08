@@ -298,37 +298,54 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   //
   // BENCHMARK RESULTS
   //
-  const size_t file_bytes = num * (3 * sizeof(float) + 3 * sizeof(float) + sizeof(float) + sizeof(type::idx));
-  const double file_size_MB = static_cast<double>(file_bytes) / (1024.0 * 1024.0);
-  const double write_bw = file_size_MB / elapse_write;
-  const double read_bw = file_size_MB / elapse_read;
+  const auto datasize = static_cast<double>(num) * static_cast<double>(3 * sizeof(float) + 3 * sizeof(float) + sizeof(float) + sizeof(type::idx));
 
   std::cout << "=== NetCDF-4 GDS Benchmark Results ===" << std::endl;
   std::cout << "VFD: " << vfd_name << " (via HDF5_DRIVER env)" << std::endl;
   std::cout << "Particles: " << num << std::endl;
-  std::cout << "File size: " << file_size_MB << " MB" << std::endl;
-  std::cout << "Write time: " << elapse_write << " s (" << write_bw << " MB/s)" << std::endl;
-  std::cout << "Read time: " << elapse_read << " s (" << read_bw << " MB/s)" << std::endl;
+  std::cout << "Data size: " << datasize << " bytes" << std::endl;
+  std::cout << "Write time: " << elapse_write << " s (" << datasize / elapse_write << " byte/s)" << std::endl;
+  std::cout << "Read time: " << elapse_read << " s (" << datasize / elapse_read << " byte/s)" << std::endl;
   std::cout << "Verification: " << (success ? "PASSED" : "FAILED") << std::endl;
 
   //
-  // WRITE CSV
+  // WRITE CSV (matching h5gds.cu format)
   //
   boost::filesystem::path log_dir("./log");
   if (!boost::filesystem::exists(log_dir)) {
     boost::filesystem::create_directories(log_dir);
   }
-  const auto csv_file = (log_dir / "nc4gds_benchmark.csv").string();
-  bool write_header = !boost::filesystem::exists(csv_file);
-  std::ofstream csv(csv_file, std::ios::app);
-  if (write_header) {
-    csv << "vfd,num,file_bytes,write_s,read_s,write_MBps,read_MBps,verified" << std::endl;
+  const std::string report = (log_dir / "nc4gds_benchmark.csv").string();
+  const boost::filesystem::path previous(report);
+  boost::system::error_code err;
+  const auto exist = boost::filesystem::exists(previous, err);
+
+  std::ofstream output(report, std::ios::app);
+  if (!exist || err) {
+    output << "VFD";
+    output << ",skip";
+    output << ",N";
+    output << ",data size [byte]";
+    output << ",latency (write) [s]";
+    output << ",latency (read) [s]";
+    output << ",bandwidth (write) [byte/s]";
+    output << ",bandwidth (read) [byte/s]";
+    output << ",filename";
+    output << std::endl;
   }
-  csv << vfd_name << "," << num << "," << file_bytes << ","
-      << elapse_write << "," << elapse_read << ","
-      << write_bw << "," << read_bw << ","
-      << (success ? "true" : "false") << std::endl;
-  csv.close();
+
+  output << std::scientific;
+  output << vfd_name;
+  output << "," << (skip ? "true" : "false");
+  output << "," << num;
+  output << "," << datasize;
+  output << "," << elapse_write;
+  output << "," << elapse_read;
+  output << "," << datasize / elapse_write;
+  output << "," << datasize / elapse_read;
+  output << "," << filename;
+  output << std::endl;
+  output.close();
 
   // Cleanup - remove test file
   boost::filesystem::remove(filename);
