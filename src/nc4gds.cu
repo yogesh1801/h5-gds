@@ -12,16 +12,13 @@
 #include <curand_mtgp32.h>  // THREAD_NUM
 #include <helper_cuda.h>    // checkCudaErrors
 #include <netcdf.h>
-#include <thrust/device_ptr.h>
-#include <thrust/equal.h>
-#include <thrust/execution_policy.h>
 
 #include <boost/filesystem.hpp>            // boost::filesystem
 #include <boost/lexical_cast.hpp>          // boost::lexical_cast
 #include <boost/program_options.hpp>       // boost::program_options
 #include <boost/uuid/uuid_generators.hpp>  // boost::uuids::random_generator
 #include <boost/uuid/uuid_io.hpp>          // convert boost::uuids::uuid to std::string
-#include <cstdlib>                         // std::exit, setenv
+#include <cstdlib>                         // std::exit
 #include <fstream>                         // std::ofstream
 #include <iostream>                        // std::cout
 #include <string>                          // std::string
@@ -31,24 +28,13 @@
 #include "generate.cuh"
 #include "netcdf4.hpp"
 
+static constexpr float newton = 1.0F;  // gravitational constant in the computational unit
+
 // Utility function for rounding up to nearest multiple
 constexpr auto round_up(const size_t org, const size_t unit) {
   const size_t mod = org % unit;
   return ((mod == 0) ? org : (org + unit - mod));
 }
-
-static constexpr type::vel_z newton = 1.0F;  // gravitational constant in the computational unit
-
-struct compare_pos {
-  __host__ __device__ bool operator()(type::pos a, type::pos b) const {
-    return ((a.x == b.x) && (a.y == b.y) && (a.z == b.z) && (a.w == b.w));
-  }
-};
-struct compare_vel_xy {
-  __host__ __device__ bool operator()(type::vel_xy a, type::vel_xy b) const {
-    return ((a.x == b.x) && (a.y == b.y));
-  }
-};
 
 ///
 /// @brief main function
@@ -67,9 +53,9 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
       "num", boost::program_options::value<type::idx>()->default_value(1024), "number of particles")(
       "vfd", boost::program_options::value<std::string>()->default_value("gds"), "VFD driver to use: sec2, gds, or direct")(
       "skip", boost::program_options::bool_switch()->default_value(false), "skip consistency check between read and original data")(
-      "virial", boost::program_options::value<std::remove_const_t<decltype(newton)>>()->default_value(0.2), "Virial ratio of the system")(
-      "radius", boost::program_options::value<std::remove_const_t<decltype(newton)>>()->default_value(1.0), "radius of the system")(
-      "mass", boost::program_options::value<std::remove_const_t<decltype(newton)>>()->default_value(1.0), "total mass of the system")(
+      "virial", boost::program_options::value<float>()->default_value(0.2), "Virial ratio of the system")(
+      "radius", boost::program_options::value<float>()->default_value(1.0), "radius of the system")(
+      "mass", boost::program_options::value<float>()->default_value(1.0), "total mass of the system")(
       "help,h", "Help");
   // read input arguments
   boost::program_options::variables_map vm;
@@ -82,68 +68,57 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   // configure the benchmark
   const auto num = vm["num"].as<type::idx>();
   const auto vfd_name = vm["vfd"].as<std::string>();
-  const auto virial = vm["virial"].as<decltype(newton)>();
-  const auto radius = vm["radius"].as<decltype(newton)>();
-  const auto mass = vm["mass"].as<decltype(newton)>();
+  const auto virial = vm["virial"].as<float>();
+  const auto radius = vm["radius"].as<float>();
+  const auto mass = vm["mass"].as<float>();
   const auto skip = vm["skip"].as<bool>();
   vm.clear();
 
   // VFD is configured externally via HDF5_DRIVER environment variable
-  // e.g., export HDF5_DRIVER=gds (or direct, sec2)
   std::cout << "Using HDF5 VFD from HDF5_DRIVER environment variable for NetCDF-4" << std::endl;
 
-  // memory allocation
+  // memory allocation - NetCDF-compatible layout (Nx3 position, Nx3 velocity, N mass, N id)
   cudaSetDevice(0);
-#if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-  type::idx* idx = nullptr;        // particle ID
-  type::pos* pos = nullptr;        // position (x, y, z) and mass (w)
-  type::vel_xy* vel_xy = nullptr;  // velocity (x, y)
-  type::vel_z* vel_z = nullptr;    // velocity (z)
-#else
-  type::idx* idx;        // particle ID
-  type::pos* pos;        // position (x, y, z) and mass (w)
-  type::vel_xy* vel_xy;  // velocity (x, y)
-  type::vel_z* vel_z;    // velocity (z)
-#endif
-  allocate_particles(&pos, &vel_xy, &vel_z, &idx, num);
-
-  // Allocate host buffers for first-touch with cudaMalloc
-  type::idx* idx_host = nullptr;
-  type::pos* pos_host = nullptr;
-  type::vel_xy* vel_xy_host = nullptr;
-  type::vel_z* vel_z_host = nullptr;
-  float* position_buf = nullptr;
-  float* velocity_buf = nullptr;
+  float* position = nullptr;
+  float* velocity = nullptr;
   float* mass_buf = nullptr;
+  type::idx* id = nullptr;
+  allocate_particles_netcdf(&position, &velocity, &mass_buf, &id, num);
+
+  // Generate initial data directly in NetCDF-compatible layout
+  set_uniform_sphere_netcdf(num, position, velocity, mass_buf, id, mass, radius, virial, newton);
+
+  // Host buffers for non-first-touch mode (cudaMalloc case needs explicit copy)
+  float* position_host = nullptr;
+  float* velocity_host = nullptr;
+  float* mass_host = nullptr;
+  type::idx* id_host = nullptr;
 
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-  // For device memory, we need host buffers for NetCDF I/O
-  {
-    auto size = round_up(num, NTHREADS);
-    size = round_up(size, THREAD_NUM);
-    idx_host = (type::idx*)malloc(size * sizeof(type::idx));
-    pos_host = (type::pos*)malloc(size * sizeof(type::pos));
-    vel_xy_host = (type::vel_xy*)malloc(size * sizeof(type::vel_xy));
-    vel_z_host = (type::vel_z*)malloc(size * sizeof(type::vel_z));
+  // Allocate host staging buffers for NetCDF I/O (NetCDF cannot write from GPU memory)
+  position_host = (float*)malloc(num * 3 * sizeof(float));
+  velocity_host = (float*)malloc(num * 3 * sizeof(float));
+  mass_host = (float*)malloc(num * sizeof(float));
+  id_host = (type::idx*)malloc(num * sizeof(type::idx));
 
-    if (!idx_host || !pos_host || !vel_xy_host || !vel_z_host) {
-      std::cerr << "Failed to allocate host buffers" << std::endl;
-      std::exit(EXIT_FAILURE);
-    }
-  }
-#endif
-
-  // Allocate reorganization buffers (NetCDF expects Nx3 layout)
-  position_buf = (float*)malloc(num * 3 * sizeof(float));
-  velocity_buf = (float*)malloc(num * 3 * sizeof(float));
-  mass_buf = (float*)malloc(num * sizeof(float));
-
-  if (!position_buf || !velocity_buf || !mass_buf) {
-    std::cerr << "Failed to allocate reorganization buffers" << std::endl;
+  if (!position_host || !velocity_host || !mass_host || !id_host) {
+    std::cerr << "Failed to allocate host staging buffers" << std::endl;
     std::exit(EXIT_FAILURE);
   }
+#endif
 
-  set_uniform_sphere(num, pos, vel_xy, vel_z, idx, mass, radius, virial, newton);
+  // Pointers for write operations
+  auto* position_write = position;
+  auto* velocity_write = velocity;
+  auto* mass_write = mass_buf;
+  auto* id_write = id;
+
+#if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
+  position_write = position_host;
+  velocity_write = velocity_host;
+  mass_write = mass_host;
+  id_write = id_host;
+#endif
 
   constexpr auto benchmark = [](const auto func) noexcept(false) {
     struct timespec ini;
@@ -154,253 +129,224 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     return (std::fma(1.0e-9, static_cast<double>(end.tv_nsec - ini.tv_nsec), end.tv_sec - ini.tv_sec));
   };
 
-  // Create NetCDF-4 file using pure NetCDF-C API
-  // HDF5 will use the VFD configured via HDF5_DRIVER environment variable
-  auto uuid = boost::uuids::random_generator{}();
-  const auto series = boost::lexical_cast<std::string>(uuid);
-  auto name = "dat/" + series + ".nc";
-
-  int ncid;
-  int dim_n, dim_3;
-  int var_pos, var_vel, var_mass, var_id;
-
-  // Prepare write pointers
-  auto* idx_write = idx;
-  auto* pos_write = pos;
-  auto* vel_xy_write = vel_xy;
-  auto* vel_z_write = vel_z;
-
-#if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-  idx_write = idx_host;
-  pos_write = pos_host;
-  vel_xy_write = vel_xy_host;
-  vel_z_write = vel_z_host;
-#endif
+  //
+  // BENCHMARK: NetCDF-4 WRITE
+  //
+  boost::filesystem::path dat_dir("./dat");
+  if (!boost::filesystem::exists(dat_dir)) {
+    boost::filesystem::create_directories(dat_dir);
+  }
+  const auto filename = (dat_dir / (boost::lexical_cast<std::string>(boost::uuids::random_generator()()) + ".nc")).string();
 
   const auto elapse_write = benchmark([&]() {
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-    // Copy GPU data to host buffers (INSIDE timing - this is part of the I/O pipeline)
-    auto size = round_up(num, NTHREADS);
-    size = round_up(size, THREAD_NUM);
-
-    checkCudaErrors(cudaMemcpy(idx_host, idx, size * sizeof(type::idx), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(pos_host, pos, size * sizeof(type::pos), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(vel_xy_host, vel_xy, size * sizeof(type::vel_xy), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(vel_z_host, vel_z, size * sizeof(type::vel_z), cudaMemcpyDeviceToHost));
+    // Copy GPU data to host buffers (INSIDE timing, consistent with h5gds.cu)
+    checkCudaErrors(cudaMemcpy(position_host, position, num * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(velocity_host, velocity, num * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(mass_host, mass_buf, num * sizeof(float), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(id_host, id, num * sizeof(type::idx), cudaMemcpyDeviceToHost));
 #endif
 
-    // Reorganize data from SoA to Nx3 layout for NetCDF
-    for (size_t i = 0; i < num; i++) {
-      position_buf[i * 3 + 0] = pos_write[i].x;
-      position_buf[i * 3 + 1] = pos_write[i].y;
-      position_buf[i * 3 + 2] = pos_write[i].z;
-      mass_buf[i] = pos_write[i].w;
-      velocity_buf[i * 3 + 0] = vel_xy_write[i].x;
-      velocity_buf[i * 3 + 1] = vel_xy_write[i].y;
-      velocity_buf[i * 3 + 2] = vel_z_write[i];
-    }
-
-    // Create NetCDF-4 file (HDF5 engine uses VFD from HDF5_DRIVER env var)
-    NC_CHECK(nc_create(name.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
+    int ncid;
+    NC_CHECK(nc_create(filename.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
 
     // Define dimensions
-    NC_CHECK(nc_def_dim(ncid, "N", num, &dim_n));
-    NC_CHECK(nc_def_dim(ncid, "three", 3, &dim_3));
+    int dim_n, dim_3;
+    NC_CHECK(nc_def_dim(ncid, "num_particles", num, &dim_n));
+    NC_CHECK(nc_def_dim(ncid, "coord", 3, &dim_3));
+    int dims_n3[2] = {dim_n, dim_3};
 
     // Define variables
-    int dims_2d[2] = {dim_n, dim_3};
-    NC_CHECK(nc_def_var(ncid, "position", NC_FLOAT, 2, dims_2d, &var_pos));
-    NC_CHECK(nc_def_var(ncid, "velocity", NC_FLOAT, 2, dims_2d, &var_vel));
+    int var_pos, var_vel, var_mass, var_id;
+    NC_CHECK(nc_def_var(ncid, "position", NC_FLOAT, 2, dims_n3, &var_pos));
+    NC_CHECK(nc_def_var(ncid, "velocity", NC_FLOAT, 2, dims_n3, &var_vel));
     NC_CHECK(nc_def_var(ncid, "mass", NC_FLOAT, 1, &dim_n, &var_mass));
     NC_CHECK(nc_def_var(ncid, "id", NC_UINT64, 1, &dim_n, &var_id));
 
-    // Write num as global attribute
+    // Store metadata as global attributes
     unsigned long long num_ull = static_cast<unsigned long long>(num);
+    unsigned long long id_ull = static_cast<unsigned long long>(num);
     NC_CHECK(nc_put_att_ulonglong(ncid, NC_GLOBAL, "num", NC_UINT64, 1, &num_ull));
+    NC_CHECK(nc_put_att_ulonglong(ncid, NC_GLOBAL, "id", NC_UINT64, 1, &id_ull));
 
-    // End define mode
-    NC_CHECK(nc_enddef(ncid));
+    // Write data
+    NC_CHECK(nc_put_var_float(ncid, var_pos, position_write));
+    NC_CHECK(nc_put_var_float(ncid, var_vel, velocity_write));
+    NC_CHECK(nc_put_var_float(ncid, var_mass, mass_write));
+    NC_CHECK(nc_put_var_ulonglong(ncid, var_id, reinterpret_cast<const unsigned long long*>(id_write)));
 
-    // Write data using pure NetCDF API
-    NC_CHECK(nc_put_var_float(ncid, var_pos, position_buf));
-    NC_CHECK(nc_put_var_float(ncid, var_vel, velocity_buf));
-    NC_CHECK(nc_put_var_float(ncid, var_mass, mass_buf));
-    NC_CHECK(nc_put_var_ulonglong(ncid, var_id, reinterpret_cast<const unsigned long long*>(idx_write)));
-
-    // Close file
     NC_CHECK(nc_close(ncid));
   });
 
-  // Allocate read buffers
-  std::remove_reference_t<decltype(*idx)>* idx_read = nullptr;
-  std::remove_reference_t<decltype(*pos)>* pos_read = nullptr;
-  std::remove_reference_t<decltype(*vel_xy)>* vel_xy_read = nullptr;
-  std::remove_reference_t<decltype(*vel_z)>* vel_z_read = nullptr;
-  allocate_particles(&pos_read, &vel_xy_read, &vel_z_read, &idx_read, num);
+  //
+  // BENCHMARK: NetCDF-4 READ
+  //
 
-  type::idx* idx_read_host = nullptr;
-  type::pos* pos_read_host = nullptr;
-  type::vel_xy* vel_xy_read_host = nullptr;
-  type::vel_z* vel_z_read_host = nullptr;
-  float* position_read_buf = nullptr;
-  float* velocity_read_buf = nullptr;
-  float* mass_read_buf = nullptr;
+  // Allocate read buffers
+  float* position_read = nullptr;
+  float* velocity_read = nullptr;
+  float* mass_read = nullptr;
+  type::idx* id_read = nullptr;
+  allocate_particles_netcdf(&position_read, &velocity_read, &mass_read, &id_read, num);
+
+  // Host buffers for read (non-first-touch mode)
+  float* position_read_host = nullptr;
+  float* velocity_read_host = nullptr;
+  float* mass_read_host = nullptr;
+  type::idx* id_read_host = nullptr;
 
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-  {
-    auto size = round_up(num, NTHREADS);
-    size = round_up(size, THREAD_NUM);
-
-    idx_read_host = (type::idx*)malloc(size * sizeof(type::idx));
-    pos_read_host = (type::pos*)malloc(size * sizeof(type::pos));
-    vel_xy_read_host = (type::vel_xy*)malloc(size * sizeof(type::vel_xy));
-    vel_z_read_host = (type::vel_z*)malloc(size * sizeof(type::vel_z));
-
-    if (!idx_read_host || !pos_read_host || !vel_xy_read_host || !vel_z_read_host) {
-      std::cerr << "Failed to allocate host read buffers" << std::endl;
-      std::exit(EXIT_FAILURE);
-    }
-  }
+  position_read_host = (float*)malloc(num * 3 * sizeof(float));
+  velocity_read_host = (float*)malloc(num * 3 * sizeof(float));
+  mass_read_host = (float*)malloc(num * sizeof(float));
+  id_read_host = (type::idx*)malloc(num * sizeof(type::idx));
 #endif
 
-  position_read_buf = (float*)malloc(num * 3 * sizeof(float));
-  velocity_read_buf = (float*)malloc(num * 3 * sizeof(float));
-  mass_read_buf = (float*)malloc(num * sizeof(float));
-
-  auto* idx_read_ptr = idx_read;
-  auto* pos_read_ptr = pos_read;
-  auto* vel_xy_read_ptr = vel_xy_read;
-  auto* vel_z_read_ptr = vel_z_read;
+  // Pointers for read operations
+  auto* position_read_ptr = position_read;
+  auto* velocity_read_ptr = velocity_read;
+  auto* mass_read_ptr = mass_read;
+  auto* id_read_ptr = id_read;
 
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-  idx_read_ptr = idx_read_host;
-  pos_read_ptr = pos_read_host;
-  vel_xy_read_ptr = vel_xy_read_host;
-  vel_z_read_ptr = vel_z_read_host;
+  position_read_ptr = position_read_host;
+  velocity_read_ptr = velocity_read_host;
+  mass_read_ptr = mass_read_host;
+  id_read_ptr = id_read_host;
 #endif
 
   const auto elapse_read = benchmark([&]() {
-    // Open NetCDF file for reading
-    NC_CHECK(nc_open(name.c_str(), NC_NOWRITE, &ncid));
-
-    // Read num attribute and verify
-    unsigned long long num_read_ull;
-    NC_CHECK(nc_get_att_ulonglong(ncid, NC_GLOBAL, "num", &num_read_ull));
-    type::idx num_read = static_cast<type::idx>(num_read_ull);
-    if (num_read != num) {
-      std::cerr << "num_read (" << num_read << ") does not match num (" << num << ")" << std::endl;
-      std::exit(EXIT_FAILURE);
-    }
+    int ncid;
+    NC_CHECK(nc_open(filename.c_str(), NC_NOWRITE, &ncid));
 
     // Get variable IDs
-    int var_pos_r, var_vel_r, var_mass_r, var_id_r;
-    NC_CHECK(nc_inq_varid(ncid, "position", &var_pos_r));
-    NC_CHECK(nc_inq_varid(ncid, "velocity", &var_vel_r));
-    NC_CHECK(nc_inq_varid(ncid, "mass", &var_mass_r));
-    NC_CHECK(nc_inq_varid(ncid, "id", &var_id_r));
+    int var_pos, var_vel, var_mass, var_id;
+    NC_CHECK(nc_inq_varid(ncid, "position", &var_pos));
+    NC_CHECK(nc_inq_varid(ncid, "velocity", &var_vel));
+    NC_CHECK(nc_inq_varid(ncid, "mass", &var_mass));
+    NC_CHECK(nc_inq_varid(ncid, "id", &var_id));
 
-    // Read data using pure NetCDF API
-    NC_CHECK(nc_get_var_float(ncid, var_pos_r, position_read_buf));
-    NC_CHECK(nc_get_var_float(ncid, var_vel_r, velocity_read_buf));
-    NC_CHECK(nc_get_var_float(ncid, var_mass_r, mass_read_buf));
-    NC_CHECK(nc_get_var_ulonglong(ncid, var_id_r, reinterpret_cast<unsigned long long*>(idx_read_ptr)));
+    // Read attributes for verification
+    unsigned long long num_read_attr;
+    NC_CHECK(nc_get_att_ulonglong(ncid, NC_GLOBAL, "num", &num_read_attr));
 
-    // Close file
+    // Read data
+    NC_CHECK(nc_get_var_float(ncid, var_pos, position_read_ptr));
+    NC_CHECK(nc_get_var_float(ncid, var_vel, velocity_read_ptr));
+    NC_CHECK(nc_get_var_float(ncid, var_mass, mass_read_ptr));
+    NC_CHECK(nc_get_var_ulonglong(ncid, var_id, reinterpret_cast<unsigned long long*>(id_read_ptr)));
+
     NC_CHECK(nc_close(ncid));
 
-    // Reorganize from Nx3 back to SoA
-    for (size_t i = 0; i < num; i++) {
-      pos_read_ptr[i].x = position_read_buf[i * 3 + 0];
-      pos_read_ptr[i].y = position_read_buf[i * 3 + 1];
-      pos_read_ptr[i].z = position_read_buf[i * 3 + 2];
-      pos_read_ptr[i].w = mass_read_buf[i];
-      vel_xy_read_ptr[i].x = velocity_read_buf[i * 3 + 0];
-      vel_xy_read_ptr[i].y = velocity_read_buf[i * 3 + 1];
-      vel_z_read_ptr[i] = velocity_read_buf[i * 3 + 2];
-    }
-
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-    // Copy host data to GPU buffers (INSIDE timing - part of I/O pipeline)
-    auto size = round_up(num, NTHREADS);
-    size = round_up(size, THREAD_NUM);
-
-    checkCudaErrors(cudaMemcpy(idx_read, idx_read_host, size * sizeof(type::idx), cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(pos_read, pos_read_host, size * sizeof(type::pos), cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(vel_xy_read, vel_xy_read_host, size * sizeof(type::vel_xy), cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(vel_z_read, vel_z_read_host, size * sizeof(type::vel_z), cudaMemcpyHostToDevice));
+    // Copy host data back to GPU (INSIDE timing, consistent with h5gds.cu)
+    checkCudaErrors(cudaMemcpy(position_read, position_read_host, num * 3 * sizeof(float), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(velocity_read, velocity_read_host, num * 3 * sizeof(float), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(mass_read, mass_read_host, num * sizeof(float), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(id_read, id_read_host, num * sizeof(type::idx), cudaMemcpyHostToDevice));
 #endif
   });
 
-  // Free temporary buffers
-  free(position_buf);
-  free(velocity_buf);
-  free(mass_buf);
-  free(position_read_buf);
-  free(velocity_read_buf);
-  free(mass_read_buf);
+  //
+  // VERIFICATION (compare on host)
+  //
+  bool success = true;
+  if (!skip) {
+    // For verification, use the host pointers
+    auto* pos_verify = position_write;
+    auto* vel_verify = velocity_write;
+    auto* mass_verify = mass_write;
+    auto* id_verify = id_write;
+    auto* pos_read_verify = position_read_ptr;
+    auto* vel_read_verify = velocity_read_ptr;
+    auto* mass_read_verify = mass_read_ptr;
+    auto* id_read_verify = id_read_ptr;
 
-  // check the read results
-  const auto success = skip ? true : (thrust::equal(thrust::device, (thrust::device_ptr<std::remove_reference_t<decltype(*idx)>>)idx, (thrust::device_ptr<std::remove_reference_t<decltype(*idx)>>)(idx + num), (thrust::device_ptr<std::remove_reference_t<decltype(*idx_read)>>)idx_read) && thrust::equal(thrust::device, (thrust::device_ptr<std::remove_reference_t<decltype(*pos)>>)pos, (thrust::device_ptr<std::remove_reference_t<decltype(*pos)>>)(pos + num), (thrust::device_ptr<std::remove_reference_t<decltype(*pos_read)>>)pos_read, compare_pos()) && thrust::equal(thrust::device, (thrust::device_ptr<std::remove_reference_t<decltype(*vel_xy)>>)vel_xy, (thrust::device_ptr<std::remove_reference_t<decltype(*vel_xy)>>)(vel_xy + num), (thrust::device_ptr<std::remove_reference_t<decltype(*vel_xy_read)>>)vel_xy_read, compare_vel_xy()) && thrust::equal(thrust::device, (thrust::device_ptr<std::remove_reference_t<decltype(*vel_z)>>)vel_z, (thrust::device_ptr<std::remove_reference_t<decltype(*vel_z)>>)(vel_z + num), (thrust::device_ptr<std::remove_reference_t<decltype(*vel_z_read)>>)vel_z_read));
-
-  if (success) {
-    // output the benchmark result
-    const std::string report = "log/nc4gds_benchmark.csv";
-    const boost::filesystem::path previous(report);
-    boost::system::error_code err;
-    const auto exist = boost::filesystem::exists(previous, err);
-
-    // write header if report is a new file
-    std::ofstream output(report, std::ios::app);
-    if (!exist || err) {
-      output << "VFD";
-      output << ",skip";
-      output << ",N";
-      output << ",data size [byte]";
-      output << ",latency (write) [s]";
-      output << ",latency (read) [s]";
-      output << ",bandwidth (write) [byte/s]";
-      output << ",bandwidth (read) [byte/s]";
-      output << ",filename";
-      output << std::endl;
+    // Compare position
+    for (size_t i = 0; i < num * 3 && success; i++) {
+      if (pos_verify[i] != pos_read_verify[i]) {
+        std::cerr << "Position mismatch at index " << i << ": " << pos_verify[i] << " vs " << pos_read_verify[i] << std::endl;
+        success = false;
+      }
     }
-
-    // write statistics of the simulation
-    output << std::scientific;
-    output << vfd_name;
-    output << "," << (skip ? "true" : "false");
-    output << "," << num;
-    const auto datasize = static_cast<double>(num) * static_cast<double>(sizeof(std::remove_reference_t<decltype(*idx)>) + sizeof(std::remove_reference_t<decltype(*pos)>) + sizeof(std::remove_reference_t<decltype(*vel_xy)>) + sizeof(std::remove_reference_t<decltype(*vel_z)>));
-    output << "," << datasize;
-    output << "," << elapse_write;
-    output << "," << elapse_read;
-    output << "," << datasize / elapse_write;
-    output << "," << datasize / elapse_read;
-    output << "," << name;
-    output << std::endl;
-    output.close();
-  } else {
-    std::cerr << __FILE__ << "(" << __LINE__ << "): " << __func__ << ": ERROR: read data does not match with the original data" << std::endl
-              << std::flush;
-    std::exit(EXIT_FAILURE);
+    // Compare velocity
+    for (size_t i = 0; i < num * 3 && success; i++) {
+      if (vel_verify[i] != vel_read_verify[i]) {
+        std::cerr << "Velocity mismatch at index " << i << ": " << vel_verify[i] << " vs " << vel_read_verify[i] << std::endl;
+        success = false;
+      }
+    }
+    // Compare mass
+    for (size_t i = 0; i < num && success; i++) {
+      if (mass_verify[i] != mass_read_verify[i]) {
+        std::cerr << "Mass mismatch at index " << i << ": " << mass_verify[i] << " vs " << mass_read_verify[i] << std::endl;
+        success = false;
+      }
+    }
+    // Compare id
+    for (size_t i = 0; i < num && success; i++) {
+      if (id_verify[i] != id_read_verify[i]) {
+        std::cerr << "ID mismatch at index " << i << ": " << id_verify[i] << " vs " << id_read_verify[i] << std::endl;
+        success = false;
+      }
+    }
+    if (success) {
+      std::cout << "Data verification: PASSED" << std::endl;
+    }
   }
 
-  // Free host buffers
+  //
+  // BENCHMARK RESULTS
+  //
+  const size_t file_bytes = num * (3 * sizeof(float) + 3 * sizeof(float) + sizeof(float) + sizeof(type::idx));
+  const double file_size_MB = static_cast<double>(file_bytes) / (1024.0 * 1024.0);
+  const double write_bw = file_size_MB / elapse_write;
+  const double read_bw = file_size_MB / elapse_read;
+
+  std::cout << "=== NetCDF-4 GDS Benchmark Results ===" << std::endl;
+  std::cout << "VFD: " << vfd_name << " (via HDF5_DRIVER env)" << std::endl;
+  std::cout << "Particles: " << num << std::endl;
+  std::cout << "File size: " << file_size_MB << " MB" << std::endl;
+  std::cout << "Write time: " << elapse_write << " s (" << write_bw << " MB/s)" << std::endl;
+  std::cout << "Read time: " << elapse_read << " s (" << read_bw << " MB/s)" << std::endl;
+  std::cout << "Verification: " << (success ? "PASSED" : "FAILED") << std::endl;
+
+  //
+  // WRITE CSV
+  //
+  boost::filesystem::path log_dir("./log");
+  if (!boost::filesystem::exists(log_dir)) {
+    boost::filesystem::create_directories(log_dir);
+  }
+  const auto csv_file = (log_dir / "nc4gds_benchmark.csv").string();
+  bool write_header = !boost::filesystem::exists(csv_file);
+  std::ofstream csv(csv_file, std::ios::app);
+  if (write_header) {
+    csv << "vfd,num,file_bytes,write_s,read_s,write_MBps,read_MBps,verified" << std::endl;
+  }
+  csv << vfd_name << "," << num << "," << file_bytes << ","
+      << elapse_write << "," << elapse_read << ","
+      << write_bw << "," << read_bw << ","
+      << (success ? "true" : "false") << std::endl;
+  csv.close();
+
+  // Cleanup - remove test file
+  boost::filesystem::remove(filename);
+
+  // Release memory
+  release_particles_netcdf(position, velocity, mass_buf, id);
+  release_particles_netcdf(position_read, velocity_read, mass_read, id_read);
+
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-  free(idx_host);
-  free(pos_host);
-  free(vel_xy_host);
-  free(vel_z_host);
-  free(idx_read_host);
-  free(pos_read_host);
-  free(vel_xy_read_host);
-  free(vel_z_read_host);
+  free(position_host);
+  free(velocity_host);
+  free(mass_host);
+  free(id_host);
+  free(position_read_host);
+  free(velocity_read_host);
+  free(mass_read_host);
+  free(id_read_host);
 #endif
 
-  release_particles(pos, vel_xy, vel_z, idx);
-  release_particles(pos_read, vel_xy_read, vel_z_read, idx_read);
-
-  // delete the file to save space
-  boost::filesystem::remove(name);
-
-  std::exit(EXIT_SUCCESS);
+  return (success ? EXIT_SUCCESS : EXIT_FAILURE);
 }

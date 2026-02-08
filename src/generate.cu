@@ -37,7 +37,7 @@
 /// @param[in,out] state state of the Mersenne Twister
 /// @param[in] offset offset for particle array
 ///
-__global__ void set_uniform_sphere_dev(const type::idx num, type::pos *pos, const type::vel_z rad, const decltype(rad) Mtot, type::vel_xy *vel_xy, type::vel_z *vel_z, type::idx *id, const decltype(rad) sig1d, curandStateMtgp32 *state, const type::idx offset = 0) {
+__global__ void set_uniform_sphere_dev(const type::idx num, type::pos* pos, const type::vel_z rad, const decltype(rad) Mtot, type::vel_xy* vel_xy, type::vel_z* vel_z, type::idx* id, const decltype(rad) sig1d, curandStateMtgp32* state, const type::idx offset = 0) {
   const auto ii = offset + GLOBALIDX_X1D;
   const auto mass = (ii < num) ? (Mtot / static_cast<decltype(Mtot)>(num)) : static_cast<decltype(Mtot)>(0.0);  // set massless particle to remove if statements in gravity calculation
   // solve the warp divergence if necessary
@@ -72,19 +72,19 @@ __global__ void set_uniform_sphere_dev(const type::idx num, type::pos *pos, cons
   // id[ii] = static_cast<std::remove_reference_t<decltype(*id)>>(curand_normal(&state[BLOCKIDX_X1D]));
 }
 
-void set_uniform_sphere(const type::idx num, type::pos *pos, type::vel_xy *vel_xy, type::vel_z *vel_z, type::idx *id, const type::vel_z Mtot, const decltype(Mtot) rad, const decltype(Mtot) virial, const decltype(Mtot) newton) noexcept(false) {
-  curandStateMtgp32 *MTstate_dev;
-  mtgp32_kernel_params *MTparam_dev;
+void set_uniform_sphere(const type::idx num, type::pos* pos, type::vel_xy* vel_xy, type::vel_z* vel_z, type::idx* id, const type::vel_z Mtot, const decltype(Mtot) rad, const decltype(Mtot) virial, const decltype(Mtot) newton) noexcept(false) {
+  curandStateMtgp32* MTstate_dev;
+  mtgp32_kernel_params* MTparam_dev;
 
   // set appropriate number of thread-blocks
   const auto Nblk_tot = BLOCKSIZE(num, THREAD_NUM);
   const auto Nblk = (Nblk_tot < CURAND_NUM_MTGP32_PARAMS) ? Nblk_tot : CURAND_NUM_MTGP32_PARAMS;
 
   // memory allocation for MT states
-  checkCudaErrors(cudaMalloc((void **)&MTstate_dev, Nblk * sizeof(decltype(*MTstate_dev))));
+  checkCudaErrors(cudaMalloc((void**)&MTstate_dev, Nblk * sizeof(decltype(*MTstate_dev))));
 
   // initialize MT states (cudaSuccess = CURAND_STATUS_SUCCESS = 0)
-  checkCudaErrors(cudaMalloc((void **)&MTparam_dev, sizeof(decltype(*MTparam_dev))));
+  checkCudaErrors(cudaMalloc((void**)&MTparam_dev, sizeof(decltype(*MTparam_dev))));
   checkCudaErrors(curandMakeMTGP32Constants(mtgp32dc_params_fast_11213, MTparam_dev));
   checkCudaErrors(curandMakeMTGP32KernelState(MTstate_dev, mtgp32dc_params_fast_11213, MTparam_dev, Nblk, 5489));  // 5489 is seed (optimal value for 32-bit MT)
 
@@ -102,6 +102,86 @@ void set_uniform_sphere(const type::idx num, type::pos *pos, type::vel_xy *vel_x
     const auto Nrun = (Nrem < CURAND_NUM_MTGP32_PARAMS) ? Nrem : CURAND_NUM_MTGP32_PARAMS;
     set_uniform_sphere_dev<<<Nrun, THREAD_NUM>>>(num, pos, rad, Mtot, vel_xy, vel_z, id, sig1d, MTstate_dev, offset);
     getLastCudaError("set_uniform_sphere_offset");
+    offset += Nrun * THREAD_NUM;
+    Nrem -= Nrun;
+  }
+  checkCudaErrors(cudaDeviceSynchronize());
+
+  // release device memory
+  checkCudaErrors(cudaFree(MTstate_dev));
+  checkCudaErrors(cudaFree(MTparam_dev));
+}
+
+// ============================================
+// NetCDF-compatible layout generation (Nx3 position, Nx3 velocity, N mass, N id)
+// ============================================
+
+///
+/// @brief Set the uniform sphere on device for NetCDF layout
+///
+__global__ void set_uniform_sphere_netcdf_dev(const type::idx num, float* position, float* velocity, float* mass, type::idx* id, const float rad, const float Mtot, const float sig1d, curandStateMtgp32* state, const type::idx offset = 0) {
+  const auto ii = offset + GLOBALIDX_X1D;
+  const auto m = (ii < num) ? (Mtot / static_cast<float>(num)) : 0.0F;
+
+#if __CUDA_ARCH__ >= 700
+  __syncwarp();
+#endif
+
+  // set particle position in Nx3 layout
+  const auto rr = rad * std::cbrt(curand_uniform(&state[BLOCKIDX_X1D]));
+  static constexpr float one = 1.0F;
+  static constexpr float two = 2.0F;
+  const auto prj = -one + two * curand_uniform(&state[BLOCKIDX_X1D]);
+  const auto RR = rr * std::sqrt(one - prj * prj);
+  const auto theta = two * boost::math::constants::pi<float>() * curand_uniform(&state[BLOCKIDX_X1D]);
+
+  position[ii * 3 + 0] = RR * std::cos(theta);
+  position[ii * 3 + 1] = RR * std::sin(theta);
+  position[ii * 3 + 2] = rr * prj;
+
+  // set mass
+  mass[ii] = m;
+
+  // set particle velocity in Nx3 layout
+  velocity[ii * 3 + 0] = sig1d * curand_normal(&state[BLOCKIDX_X1D]);
+  velocity[ii * 3 + 1] = sig1d * curand_normal(&state[BLOCKIDX_X1D]);
+  velocity[ii * 3 + 2] = sig1d * curand_normal(&state[BLOCKIDX_X1D]);
+
+  // set particle ID
+  id[ii] = ii;
+}
+
+void set_uniform_sphere_netcdf(const type::idx num, float* position, float* velocity, float* mass, type::idx* id, const float Mtot, const float rad, const float virial, const float newton) noexcept(false) {
+  curandStateMtgp32* MTstate_dev;
+  mtgp32_kernel_params* MTparam_dev;
+
+  // set appropriate number of thread-blocks
+  const auto Nblk_tot = BLOCKSIZE(num, THREAD_NUM);
+  const auto Nblk = (Nblk_tot < CURAND_NUM_MTGP32_PARAMS) ? Nblk_tot : CURAND_NUM_MTGP32_PARAMS;
+
+  // memory allocation for MT states
+  checkCudaErrors(cudaMalloc((void**)&MTstate_dev, Nblk * sizeof(decltype(*MTstate_dev))));
+
+  // initialize MT states
+  checkCudaErrors(cudaMalloc((void**)&MTparam_dev, sizeof(decltype(*MTparam_dev))));
+  checkCudaErrors(curandMakeMTGP32Constants(mtgp32dc_params_fast_11213, MTparam_dev));
+  checkCudaErrors(curandMakeMTGP32KernelState(MTstate_dev, mtgp32dc_params_fast_11213, MTparam_dev, Nblk, 5489));
+
+  // set appropriate velocity dispersion for the given Virial ratio
+  const auto sigma = std::sqrt(1.2F * newton * Mtot * virial / rad);
+  const auto sig1d = sigma / boost::math::constants::root_three<float>();
+
+  // generate uniform sphere for NetCDF layout
+  checkCudaErrors(cudaFuncSetAttribute(set_uniform_sphere_netcdf_dev, cudaFuncAttributePreferredSharedMemoryCarveout, 0));
+  set_uniform_sphere_netcdf_dev<<<Nblk, THREAD_NUM>>>(num, position, velocity, mass, id, rad, Mtot, sig1d, MTstate_dev);
+  getLastCudaError("set_uniform_sphere_netcdf");
+
+  auto Nrem = Nblk_tot - Nblk;
+  auto offset = Nblk * THREAD_NUM;
+  while (Nrem > 0) {
+    const auto Nrun = (Nrem < CURAND_NUM_MTGP32_PARAMS) ? Nrem : CURAND_NUM_MTGP32_PARAMS;
+    set_uniform_sphere_netcdf_dev<<<Nrun, THREAD_NUM>>>(num, position, velocity, mass, id, rad, Mtot, sig1d, MTstate_dev, offset);
+    getLastCudaError("set_uniform_sphere_netcdf_offset");
     offset += Nrun * THREAD_NUM;
     Nrem -= Nrun;
   }

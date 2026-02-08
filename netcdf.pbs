@@ -1,0 +1,203 @@
+#!/bin/bash
+#PBS -q debug-g
+#PBS -l select=1
+#PBS -l walltime=00:30:00
+#PBS -W group_list=jh250079
+#PBS -j oe
+#PBS -N nc4gds_sweep
+
+# ============================================
+# BENCHMARK CONFIGURATION
+# ============================================
+# Particle counts (file sizes) - N values
+NUM_VALUES=(
+    1024         # 2^10  (~37 KB)
+    2048         # 2^11  (~74 KB)
+    4096         # 2^12  (~148 KB)
+    8192         # 2^13  (~295 KB)
+    16384        # 2^14  (~590 KB)
+    32768        # 2^15  (~1.18 MB)
+    65536        # 2^16  (~2.36 MB)
+    131072       # 2^17  (~4.72 MB)
+    262144       # 2^18  (~9.44 MB)
+    524288       # 2^19  (~18.9 MB)
+    1048576      # 2^20  (~37.7 MB)
+    2097152      # 2^21  (~75.5 MB)
+    4194304      # 2^22  (~151 MB)
+    8388608      # 2^23  (~302 MB)
+    16777216     # 2^24  (~604 MB)
+    33554432     # 2^25  (~1.21 GB)
+    67108864     # 2^26  (~2.42 GB)
+    134217728    # 2^27  (~4.83 GB)
+)
+
+# VFD mode - GDS only (set via HDF5_DRIVER env var)
+VFD_MODE="gds"
+
+ELAPSE_MAX=120s
+ITERATIONS=1
+
+# ============================================
+# ENVIRONMENT SETUP
+# ============================================
+module purge
+module load cuda
+module unload nvidia
+
+echo "=== Loaded Modules ==="
+module list
+echo ""
+
+# Set HDF5 environment
+export HDF5_HOME=/work/jh250079/n14001/hdf5_install
+export PATH=$HDF5_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$HDF5_HOME/lib:$LD_LIBRARY_PATH
+
+# Set VFD-GDS environment
+export CPATH=/work/jh250079/n14001/vfd-gds/src:$CPATH
+export LD_LIBRARY_PATH=/work/jh250079/n14001/vfd-gds/build/bin:$LD_LIBRARY_PATH
+export HDF5_PLUGIN_PATH=/work/jh250079/n14001/vfd-gds/build/bin/
+
+# Set NetCDF environment
+export NETCDF_HOME=/work/jh250079/n14001/netcdf_install
+export PATH=$NETCDF_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$NETCDF_HOME/lib:$LD_LIBRARY_PATH
+
+# Configure HDF5 to use GDS VFD for NetCDF-4
+export HDF5_DRIVER=gds
+
+# Set cuFile configuration for GDS native mode
+export CUFILE_ENV_PATH_JSON=${PBS_O_WORKDIR}/disable_compat.json
+
+echo "=== Environment Configuration ==="
+echo "HDF5_HOME: $HDF5_HOME"
+echo "HDF5_PLUGIN_PATH: $HDF5_PLUGIN_PATH"
+echo "HDF5_DRIVER: $HDF5_DRIVER"
+echo "NETCDF_HOME: $NETCDF_HOME"
+echo "CUDA_HOME: $CUDA_HOME"
+echo "CUFILE_ENV_PATH_JSON: $CUFILE_ENV_PATH_JSON"
+echo ""
+
+# Start timestamp
+echo "=== Job Start: $(date) ==="
+echo ""
+
+# ============================================
+# GPU CONFIGURATION (Fixed at GPU 0)
+# ============================================
+GPU_ID=0
+export CUDA_VISIBLE_DEVICES=$GPU_ID
+
+echo "=== Using GPU $GPU_ID ==="
+
+# Get GPU PCIe bus ID and NUMA node
+BUS_ID=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | tr '[:upper:]' '[:lower:]' | sed 's/^0\{0,\}\([0-9]\{4\}\)/\1/')
+NUMA_NODE=$(cat /sys/bus/pci/devices/$BUS_ID/numa_node)
+
+echo "GPU $GPU_ID: BUS_ID=$BUS_ID, NUMA_NODE=$NUMA_NODE"
+
+# Display GPU topology
+echo "=== GPU Topology ==="
+nvidia-smi topo -m
+echo ""
+
+# Run GDS health check
+if [ -f "$CUDA_HOME/gds/tools/gdscheck" ]; then
+    echo "=== GPUDirect Storage Health Check ==="
+    numactl --cpunodebind=$NUMA_NODE --membind=$NUMA_NODE $CUDA_HOME/gds/tools/gdscheck -p
+    echo ""
+else
+    echo "WARNING: gdscheck not found, skipping GDS verification"
+fi
+
+# ============================================
+# DIRECTORY SETUP
+# ============================================
+ROOT="/tmp/yogesh/gpu${GPU_ID}"
+TEMP="${PBS_O_WORKDIR}/temp"
+DUMP="${PBS_O_WORKDIR}/results"
+
+mkdir -p "${ROOT}"
+mkdir -p "${TEMP}"
+mkdir -p "${DUMP}"
+
+# Copy executable and prepare directories
+cd "${ROOT}"
+cp -r ${PBS_O_WORKDIR}/bin .
+mkdir -p dat log
+
+echo "Working directory: ${ROOT}"
+echo "Results will be saved to: ${DUMP}"
+echo ""
+
+# ============================================
+# PARAMETER SWEEP (VFD = GDS)
+# ============================================
+TOTAL_RUNS=${#NUM_VALUES[@]}
+CURRENT_RUN=0
+
+echo "=== Starting Parameter Sweep ==="
+echo "VFD: ${VFD_MODE} (via HDF5_DRIVER env var)"
+echo "Total configurations to test: ${TOTAL_RUNS}"
+echo ""
+
+# Loop over particle counts (file sizes)
+for NUM in "${NUM_VALUES[@]}"
+do
+    CURRENT_RUN=$((CURRENT_RUN + 1))
+
+    echo ""
+    echo "--- Run ${CURRENT_RUN}/${TOTAL_RUNS} ---"
+    echo "VFD=$VFD_MODE, NUM=$NUM"
+
+    # Run benchmark with NUMA affinity
+    timeout ${ELAPSE_MAX} numactl --cpunodebind=$NUMA_NODE --membind=$NUMA_NODE \
+        bin/nc4gds \
+        --num $NUM \
+        --vfd $VFD_MODE
+
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 124 ]; then
+        echo "WARNING: Benchmark timed out after ${ELAPSE_MAX}"
+    elif [ $EXIT_CODE -ne 0 ]; then
+        echo "ERROR: Benchmark failed with exit code $EXIT_CODE"
+    fi
+
+    # Sync results to temp directory periodically
+    rsync -av log/ ${TEMP}/log/
+
+done  # NUM loop
+
+# ============================================
+# CLEANUP AND RESULTS
+# ============================================
+echo "=== Copying final results to ${DUMP}/ ==="
+rsync -av log/ ${DUMP}/log/
+cp log/nc4gds_benchmark.csv ${DUMP}/nc4gds_benchmark_gpu${GPU_ID}.csv
+
+# Copy cuFile logs if they exist
+if ls cufile*.log 1> /dev/null 2>&1; then
+    echo "=== Copying cuFile logs ==="
+    cp cufile*.log ${DUMP}/
+fi
+if ls ${ROOT}/cufile*.log 1> /dev/null 2>&1; then
+    cp ${ROOT}/cufile*.log ${DUMP}/
+fi
+
+echo "=== Cleaning up scratch space ==="
+rm -rf ${ROOT}
+rm -rf ${TEMP}
+
+echo ""
+echo "=== Job Finish: $(date) ==="
+echo "Results saved to: ${DUMP}/nc4gds_benchmark_gpu${GPU_ID}.csv"
+
+# Display summary statistics
+if [ -f "${DUMP}/nc4gds_benchmark_gpu${GPU_ID}.csv" ]; then
+    echo ""
+    echo "=== Benchmark Summary ==="
+    echo "Total rows: $(wc -l < ${DUMP}/nc4gds_benchmark_gpu${GPU_ID}.csv)"
+    head -1 ${DUMP}/nc4gds_benchmark_gpu${GPU_ID}.csv
+fi
+
+exit 0
