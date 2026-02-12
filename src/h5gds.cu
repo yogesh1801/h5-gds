@@ -7,8 +7,10 @@
 ///
 /// The MIT License is applied to this software, see LICENSE
 ///
-#include <H5FDgds.h>  // VFD for GDS
+#include <H5FDgds.h>        // VFD for GDS
+#include <curand_mtgp32.h>  // THREAD_NUM
 #include <hdf5.h>
+#include <helper_cuda.h>  // checkCudaErrors
 #include <thrust/device_ptr.h>
 #include <thrust/equal.h>
 #include <thrust/execution_policy.h>
@@ -24,9 +26,6 @@
 #include <iostream>                        // std::cout
 #include <sstream>                         // std::stringstream
 #include <string>                          // std::string
-
-#include <helper_cuda.h>    // checkCudaErrors
-#include <curand_mtgp32.h>  // THREAD_NUM
 
 #include "allocate.cuh"
 #include "common.cuh"
@@ -58,7 +57,7 @@ struct compare_vel_xy {
 /// @param[in] argc number of input argument(s)
 /// @param[in] argv input argument(s)
 ///
-auto main(const int32_t argc, const char *const *const argv) -> int32_t {
+auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   // use scientific notation for floating-point number
   std::cout << std::scientific;
 
@@ -116,34 +115,34 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   // memory allocation
   cudaSetDevice(0);
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-  type::idx *idx = nullptr;        // particle ID
-  type::pos *pos = nullptr;        // position (x, y, z) and mass (w)
-  type::vel_xy *vel_xy = nullptr;  // velocity (x, y)
-  type::vel_z *vel_z = nullptr;    // velocity (z)
+  type::idx* idx = nullptr;        // particle ID
+  type::pos* pos = nullptr;        // position (x, y, z) and mass (w)
+  type::vel_xy* vel_xy = nullptr;  // velocity (x, y)
+  type::vel_z* vel_z = nullptr;    // velocity (z)
 #else
-  type::idx *idx;        // particle ID
-  type::pos *pos;        // position (x, y, z) and mass (w)
-  type::vel_xy *vel_xy;  // velocity (x, y)
-  type::vel_z *vel_z;    // velocity (z)
+  type::idx* idx;        // particle ID
+  type::pos* pos;        // position (x, y, z) and mass (w)
+  type::vel_xy* vel_xy;  // velocity (x, y)
+  type::vel_z* vel_z;    // velocity (z)
 #endif
   allocate_particles(&pos, &vel_xy, &vel_z, &idx, num);
 
   // Allocate host buffers for sec2/direct VFDs when using cudaMalloc
-  type::idx *idx_host = nullptr;
-  type::pos *pos_host = nullptr;
-  type::vel_xy *vel_xy_host = nullptr;
-  type::vel_z *vel_z_host = nullptr;
+  type::idx* idx_host = nullptr;
+  type::pos* pos_host = nullptr;
+  type::vel_xy* vel_xy_host = nullptr;
+  type::vel_z* vel_z_host = nullptr;
 
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
   // Only allocate host buffers if using sec2 or direct VFD with cudaMalloc
   if (vfd_name == "sec2" || vfd_name == "direct") {
     auto size = round_up(num, NTHREADS);
     size = round_up(size, THREAD_NUM);
-    idx_host = (type::idx *)malloc(size * sizeof(type::idx));
-    pos_host = (type::pos *)malloc(size * sizeof(type::pos));
-    vel_xy_host = (type::vel_xy *)malloc(size * sizeof(type::vel_xy));
-    vel_z_host = (type::vel_z *)malloc(size * sizeof(type::vel_z));
-    
+    idx_host = (type::idx*)malloc(size * sizeof(type::idx));
+    pos_host = (type::pos*)malloc(size * sizeof(type::pos));
+    vel_xy_host = (type::vel_xy*)malloc(size * sizeof(type::vel_xy));
+    vel_z_host = (type::vel_z*)malloc(size * sizeof(type::vel_z));
+
     if (!idx_host || !pos_host || !vel_xy_host || !vel_z_host) {
       std::cerr << "Failed to allocate host buffers for " << vfd_name << " VFD" << std::endl;
       std::exit(EXIT_FAILURE);
@@ -192,19 +191,21 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     H5Pset_fapl_sec2(fapl);
   }
 
+  H5Pset_alignment(fapl, 0, 4096);
+
   // create HDF5 file
   auto uuid = boost::uuids::random_generator{}();
   const auto series = boost::lexical_cast<std::string>(uuid);
   auto name = "dat/" + series + ".h5";
   auto target = H5Fcreate(name.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
-  
+
   // preparation for H5Dwrite_multi()
   // Use host buffers for sec2/direct with cudaMalloc, otherwise use original pointers
   auto* idx_write = idx;
   auto* pos_write = pos;
   auto* vel_xy_write = vel_xy;
   auto* vel_z_write = vel_z;
-  
+
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
   if (vfd_name == "sec2" || vfd_name == "direct") {
     idx_write = idx_host;
@@ -234,14 +235,14 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
     if (vfd_name == "sec2" || vfd_name == "direct") {
       auto size = round_up(num, NTHREADS);
       size = round_up(size, THREAD_NUM);
-      
+
       checkCudaErrors(cudaMemcpy(idx_host, idx, size * sizeof(type::idx), cudaMemcpyDeviceToHost));
       checkCudaErrors(cudaMemcpy(pos_host, pos, size * sizeof(type::pos), cudaMemcpyDeviceToHost));
       checkCudaErrors(cudaMemcpy(vel_xy_host, vel_xy, size * sizeof(type::vel_xy), cudaMemcpyDeviceToHost));
       checkCudaErrors(cudaMemcpy(vel_z_host, vel_z, size * sizeof(type::vel_z), cudaMemcpyDeviceToHost));
     }
 #endif
-    
+
     h5write.execute();
   });
   // write attribute
@@ -307,28 +308,28 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
               << std::flush;
     std::exit(EXIT_FAILURE);
   }
-  std::remove_reference_t<decltype(*idx)> *idx_read = nullptr;        // particle ID
-  std::remove_reference_t<decltype(*pos)> *pos_read = nullptr;        // position (x, y, z) and mass (w)
-  std::remove_reference_t<decltype(*vel_xy)> *vel_xy_read = nullptr;  // velocity (x, y)
-  std::remove_reference_t<decltype(*vel_z)> *vel_z_read = nullptr;    // velocity (z)
+  std::remove_reference_t<decltype(*idx)>* idx_read = nullptr;        // particle ID
+  std::remove_reference_t<decltype(*pos)>* pos_read = nullptr;        // position (x, y, z) and mass (w)
+  std::remove_reference_t<decltype(*vel_xy)>* vel_xy_read = nullptr;  // velocity (x, y)
+  std::remove_reference_t<decltype(*vel_z)>* vel_z_read = nullptr;    // velocity (z)
   allocate_particles(&pos_read, &vel_xy_read, &vel_z_read, &idx_read, num_read);
-  
+
   // Allocate host buffers for reading with sec2/direct VFDs
-  type::idx *idx_read_host = nullptr;
-  type::pos *pos_read_host = nullptr;
-  type::vel_xy *vel_xy_read_host = nullptr;
-  type::vel_z *vel_z_read_host = nullptr;
-  
+  type::idx* idx_read_host = nullptr;
+  type::pos* pos_read_host = nullptr;
+  type::vel_xy* vel_xy_read_host = nullptr;
+  type::vel_z* vel_z_read_host = nullptr;
+
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
   if (vfd_name == "sec2" || vfd_name == "direct") {
     auto size = round_up(num_read, NTHREADS);
     size = round_up(size, THREAD_NUM);
-    
-    idx_read_host = (type::idx *)malloc(size * sizeof(type::idx));
-    pos_read_host = (type::pos *)malloc(size * sizeof(type::pos));
-    vel_xy_read_host = (type::vel_xy *)malloc(size * sizeof(type::vel_xy));
-    vel_z_read_host = (type::vel_z *)malloc(size * sizeof(type::vel_z));
-    
+
+    idx_read_host = (type::idx*)malloc(size * sizeof(type::idx));
+    pos_read_host = (type::pos*)malloc(size * sizeof(type::pos));
+    vel_xy_read_host = (type::vel_xy*)malloc(size * sizeof(type::vel_xy));
+    vel_z_read_host = (type::vel_z*)malloc(size * sizeof(type::vel_z));
+
     if (!idx_read_host || !pos_read_host || !vel_xy_read_host || !vel_z_read_host) {
       std::cerr << "Failed to allocate host read buffers for " << vfd_name << " VFD" << std::endl;
       std::exit(EXIT_FAILURE);
@@ -342,7 +343,7 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   auto* pos_read_ptr = pos_read;
   auto* vel_xy_read_ptr = vel_xy_read;
   auto* vel_z_read_ptr = vel_z_read;
-  
+
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
   if (vfd_name == "sec2" || vfd_name == "direct") {
     idx_read_ptr = idx_read_host;
@@ -366,15 +367,15 @@ auto main(const int32_t argc, const char *const *const argv) -> int32_t {
   }
   // execute H5Dread_multi()
   // h5read.execute();
-  const auto elapse_read = benchmark([&]() { 
-    h5read.execute(); 
-    
+  const auto elapse_read = benchmark([&]() {
+    h5read.execute();
+
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
     // Copy host data to GPU buffers for sec2/direct VFDs (INSIDE timing)
     if (vfd_name == "sec2" || vfd_name == "direct") {
       auto size = round_up(num_read, NTHREADS);
       size = round_up(size, THREAD_NUM);
-      
+
       checkCudaErrors(cudaMemcpy(idx_read, idx_read_host, size * sizeof(type::idx), cudaMemcpyHostToDevice));
       checkCudaErrors(cudaMemcpy(pos_read, pos_read_host, size * sizeof(type::pos), cudaMemcpyHostToDevice));
       checkCudaErrors(cudaMemcpy(vel_xy_read, vel_xy_read_host, size * sizeof(type::vel_xy), cudaMemcpyHostToDevice));
