@@ -10,8 +10,10 @@
 /// The MIT License is applied to this software, see LICENSE
 ///
 #include <curand_mtgp32.h>  // THREAD_NUM
+#include <fcntl.h>          // open, O_RDONLY
 #include <helper_cuda.h>    // checkCudaErrors
 #include <netcdf.h>
+#include <unistd.h>  // fsync, close
 
 #include <boost/filesystem.hpp>            // boost::filesystem
 #include <boost/lexical_cast.hpp>          // boost::lexical_cast
@@ -138,6 +140,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   }
   const auto filename = (dat_dir / (boost::lexical_cast<std::string>(boost::uuids::random_generator()()) + ".nc")).string();
 
+  int ncid;
   const auto elapse_write = benchmark([&]() {
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
     // Copy GPU data to host buffers (INSIDE timing, consistent with h5gds.cu)
@@ -147,7 +150,6 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     checkCudaErrors(cudaMemcpy(id_host, id, num * sizeof(type::idx), cudaMemcpyDeviceToHost));
 #endif
 
-    int ncid;
     NC_CHECK(nc_create(filename.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid));
 
     // Define dimensions
@@ -174,9 +176,18 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     NC_CHECK(nc_put_var_float(ncid, var_vel, velocity_write));
     NC_CHECK(nc_put_var_float(ncid, var_mass, mass_write));
     NC_CHECK(nc_put_var_ulonglong(ncid, var_id, reinterpret_cast<const unsigned long long*>(id_write)));
-
-    NC_CHECK(nc_close(ncid));
+    NC_CHECK(nc_sync(ncid));
   });
+  NC_CHECK(nc_close(ncid));
+
+  // Explicitly sync the file to disk to ensure raw read performance
+  const int fd = open(filename.c_str(), O_RDONLY);
+  if (fd != -1) {
+    fsync(fd);
+    close(fd);
+  } else {
+    std::cerr << "Warning: Failed to open file for explicit fsync: " << filename << std::endl;
+  }
 
   //
   // BENCHMARK: NetCDF-4 READ

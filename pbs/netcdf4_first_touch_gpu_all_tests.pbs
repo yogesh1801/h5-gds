@@ -1,0 +1,251 @@
+#!/bin/bash
+#PBS -q debug-g
+#PBS -l select=1
+#PBS -l walltime=00:10:00
+#PBS -W group_list=jh250079
+#PBS -j oe
+#PBS -N nc4gds_first_touch_gpu
+
+# ============================================
+# NetCDF-4 First Touch GPU - Comprehensive VFD Benchmark
+# Tests: GDS Native, GDS Compatibility, SEC2, Direct I/O
+# Memory: malloc + GPU first-touch (pages backed by GPU HBM)
+# ============================================
+
+# ============================================
+# BENCHMARK CONFIGURATION
+# ============================================
+# Particle counts (file sizes) - N values (powers of 2)
+NUM_VALUES=(
+    1024         # 2^10  (~37 KB)
+    2048         # 2^11  (~74 KB)
+    4096         # 2^12  (~148 KB)
+    8192         # 2^13  (~295 KB)
+    16384        # 2^14  (~590 KB)
+    32768        # 2^15  (~1.18 MB)
+    65536        # 2^16  (~2.36 MB)
+    131072       # 2^17  (~4.72 MB)
+    262144       # 2^18  (~9.44 MB)
+    524288       # 2^19  (~18.9 MB)
+    1048576      # 2^20  (~37.7 MB)
+    2097152      # 2^21  (~75.5 MB)
+    4194304      # 2^22  (~151 MB)
+    8388608      # 2^23  (~302 MB)
+    16777216     # 2^24  (~604 MB)
+    33554432     # 2^25  (~1.21 GB)
+    67108864     # 2^26  (~2.42 GB)
+    134217728    # 2^27  (~4.83 GB)
+)
+
+# VFD modes to test (configured via HDF5_DRIVER environment variable)
+VFD_MODES=(gds-native gds-compat sec2 direct)
+
+# GDS configuration files
+GDS_NATIVE_JSON="${PBS_O_WORKDIR}/disable_compat.json"
+GDS_COMPAT_JSON="${PBS_O_WORKDIR}/force_compat.json"
+
+# Timeout for each benchmark run
+ELAPSE_MAX=600s
+
+# ============================================
+# ENVIRONMENT SETUP
+# ============================================
+module purge
+module load nvidia
+module load cuda
+module unload nvidia
+
+echo "=== Loaded Modules ==="
+module list
+echo ""
+
+# Set VFD-GDS environment
+export CPATH=/work/jh250079/n14001/vfd-gds/src:$CPATH
+export LD_LIBRARY_PATH=/work/jh250079/n14001/vfd-gds/build/bin:$LD_LIBRARY_PATH
+export CPATH=/work/jh250079/n14001/netcdf_install/include:$CPATH
+export HDF5_PLUGIN_PATH=/work/jh250079/n14001/vfd-gds/build/bin/
+
+# Add HDF5 and NetCDF library paths for runtime linking
+export LD_LIBRARY_PATH=/work/jh250079/n14001/hdf5_install/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/work/jh250079/n14001/netcdf_install/lib64:$LD_LIBRARY_PATH
+
+echo "=== Environment Configuration ==="
+echo "HDF5_HOME: $HDF5_HOME"
+echo "HDF5_PLUGIN_PATH: $HDF5_PLUGIN_PATH"
+echo "CUDA_HOME: $CUDA_HOME"
+echo ""
+
+# ============================================
+# GPU CONFIGURATION (Fixed at GPU 0)
+# ============================================
+GPU_ID=0
+export CPATH=/work/jh250079/n14001/vfd-gds/src:$CPATH
+
+echo "=== Using GPU $GPU_ID ==="
+
+# Get GPU PCIe bus ID and NUMA node
+BUS_ID=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | tr '[:upper:]' '[:lower:]' | sed 's/^0\{0,\}\([0-9]\{4\}\)/\1/')
+NUMA_NODE=$(cat /sys/bus/pci/devices/$BUS_ID/numa_node)
+
+echo "GPU $GPU_ID: BUS_ID=$BUS_ID, NUMA_NODE=$NUMA_NODE"
+
+# Display GPU topology
+echo "=== GPU Topology ==="
+nvidia-smi topo -m
+echo ""
+
+# Run GDS health check
+if [ -f "$CUDA_HOME/gds/tools/gdscheck" ]; then
+    echo "=== GPUDirect Storage Health Check ==="
+    numactl --localalloc ${CUDA_PATH}/gds/tools/gdscheck -p
+    echo ""
+else
+    echo "WARNING: gdscheck not found, skipping GDS verification"
+fi
+
+# ============================================
+# DIRECTORY SETUP
+# ============================================
+ROOT="/local/${USER}/gpu${GPU_ID}"
+TEMP="${PBS_O_WORKDIR}/temp"
+DUMP="${PBS_O_WORKDIR}/results"
+
+mkdir -p "${ROOT}"
+mkdir -p "${TEMP}"
+mkdir -p "${DUMP}"
+
+# Copy executable and prepare directories
+cd "${ROOT}"
+cp -r ${PBS_O_WORKDIR}/bin .
+mkdir -p dat log
+
+echo "Working directory: ${ROOT}"
+echo "Results will be saved to: ${DUMP}"
+echo ""
+
+# ============================================
+# PARAMETER SWEEP
+# ============================================
+TOTAL_RUNS=$((${#NUM_VALUES[@]} * ${#VFD_MODES[@]}))
+CURRENT_RUN=0
+
+echo "=========================================="
+echo "NetCDF-4 First Touch GPU - Comprehensive VFD Benchmark"
+echo "=========================================="
+echo "Configuration:"
+echo "  Memory allocation: malloc + GPU first-touch"
+echo "  NetCDF-4 API with HDF5 backend"
+echo "  VFD configured via HDF5_DRIVER environment variable"
+echo ""
+echo "Total configurations to test: ${TOTAL_RUNS}"
+echo "  - VFD modes: ${#VFD_MODES[@]}"
+echo "  - NUM values: ${#NUM_VALUES[@]}"
+echo ""
+
+# Loop over VFD modes
+for VFD_MODE in "${VFD_MODES[@]}"
+do
+    echo "========================================="
+    echo "VFD MODE: ${VFD_MODE}"
+    echo "========================================="
+
+    # Configure GDS mode and set HDF5_DRIVER environment variable
+    if [ "$VFD_MODE" == "gds-native" ]; then
+        export CUFILE_ENV_PATH_JSON="${GDS_NATIVE_JSON}"
+        export HDF5_DRIVER="gds"
+        echo "Using GDS Native mode (disable_compat.json)"
+    elif [ "$VFD_MODE" == "gds-compat" ]; then
+        export CUFILE_ENV_PATH_JSON="${GDS_COMPAT_JSON}"
+        export HDF5_DRIVER="gds"
+        echo "Using GDS Compat mode (force_compat.json)"
+    elif [ "$VFD_MODE" == "direct" ]; then
+        unset CUFILE_ENV_PATH_JSON
+        export HDF5_DRIVER="direct"
+        echo "Using Direct I/O VFD"
+    else
+        # For sec2, no JSON needed
+        unset CUFILE_ENV_PATH_JSON
+        export HDF5_DRIVER="sec2"
+        echo "Using SEC2 VFD (POSIX I/O)"
+    fi
+    
+    echo "HDF5_DRIVER: ${HDF5_DRIVER}"
+    echo "CUFILE_ENV_PATH_JSON: ${CUFILE_ENV_PATH_JSON:-not set}"
+    echo ""
+
+    # Loop over particle counts
+    for NUM in "${NUM_VALUES[@]}"
+    do
+        CURRENT_RUN=$((CURRENT_RUN + 1))
+
+        echo ""
+        echo "--- Run ${CURRENT_RUN}/${TOTAL_RUNS} ---"
+        echo "MODE=$VFD_MODE, HDF5_DRIVER=$HDF5_DRIVER, NUM=$NUM"
+
+        # Run benchmark with NUMA affinity
+        timeout ${ELAPSE_MAX} numactl --localalloc \
+            bin/nc4gds \
+            --num $NUM \
+            --vfd $VFD_MODE
+
+        EXIT_CODE=$?
+        if [ $EXIT_CODE -eq 124 ]; then
+            echo "WARNING: Benchmark timed out after ${ELAPSE_MAX}"
+        elif [ $EXIT_CODE -ne 0 ]; then
+            echo "ERROR: Benchmark failed with exit code $EXIT_CODE"
+        fi
+
+        # Sync results to temp directory periodically
+        rsync -av log/ ${TEMP}/log/
+        
+        # Sleep to allow system to stabilize between runs
+        sleep 1
+
+    done  # NUM loop
+
+    echo ""
+done  # VFD loop
+
+# ============================================
+# CLEANUP AND RESULTS
+# ============================================
+echo "=== Copying final results to ${DUMP}/ ==="
+rsync -av log/ ${DUMP}/log/
+cp log/nc4gds_benchmark.csv ${DUMP}/nc4gds_first_touch_gpu_all.csv
+
+# Copy cuFile logs if they exist (GDS diagnostic logs)
+if [ -f "${ROOT}/cufile.log" ]; then
+    echo "Copying cufile.log from working directory..."
+    cp ${ROOT}/cufile.log ${DUMP}/cufile_nc4_first_touch_gpu_all.log
+fi
+
+if [ -f "/tmp/cufile.log" ]; then
+    echo "Copying cufile.log from /tmp..."
+    cp /tmp/cufile.log ${DUMP}/cufile_nc4_tmp_first_touch_gpu_all.log
+fi
+
+# Copy any cufile logs with timestamps
+find ${ROOT} -name "cufile*.log" -exec cp {} ${DUMP}/ \;
+find /tmp -name "cufile*.log" -user $(whoami) -exec cp {} ${DUMP}/ \; 2>/dev/null
+
+echo "=== Cleaning up scratch space ==="
+rm -rf ${ROOT}
+rm -rf ${TEMP}
+
+echo ""
+echo "=== Job Finish: $(date) ==="
+echo "Results saved to: ${DUMP}/nc4gds_first_touch_gpu_all.csv"
+
+# Display summary statistics
+if [ -f "${DUMP}/nc4gds_first_touch_gpu_all.csv" ]; then
+    echo ""
+    echo "=== Benchmark Summary ==="
+    echo "Total rows: $(wc -l <${DUMP}/nc4gds_first_touch_gpu_all.csv)"
+    echo "Total tests run: ${CURRENT_RUN}"
+    echo "VFDs tested: ${VFD_MODES[@]}"
+    echo ""
+    echo "=== First 5 rows of results ==="
+    head -6 ${DUMP}/nc4gds_first_touch_gpu_all.csv
+fi
+
+exit 0

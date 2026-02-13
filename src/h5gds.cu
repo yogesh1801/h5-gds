@@ -9,11 +9,13 @@
 ///
 #include <H5FDgds.h>        // VFD for GDS
 #include <curand_mtgp32.h>  // THREAD_NUM
+#include <fcntl.h>          // open, O_RDONLY
 #include <hdf5.h>
 #include <helper_cuda.h>  // checkCudaErrors
 #include <thrust/device_ptr.h>
 #include <thrust/equal.h>
 #include <thrust/execution_policy.h>
+#include <unistd.h>  // fsync, close
 
 #include <boost/filesystem.hpp>            // boost::filesystem
 #include <boost/lexical_cast.hpp>          // boost::lexical_cast
@@ -244,11 +246,21 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 #endif
 
     h5write.execute();
+    H5Fflush(target, H5F_SCOPE_GLOBAL);
   });
   // write attribute
   util::hdf5::write_attr(hdf5_dataspace_1, target, "num", &num);
   // close the file
   H5Fclose(target);
+
+  // Explicitly sync the file to disk to ensure raw read performance
+  const int fd = open(name.c_str(), O_RDONLY);
+  if (fd != -1) {
+    fsync(fd);
+    close(fd);
+  } else {
+    std::cerr << "Warning: Failed to open file for explicit fsync: " << name << std::endl;
+  }
 
   // generate XDMF file if requested
   if (!asis && write_xdmf) {

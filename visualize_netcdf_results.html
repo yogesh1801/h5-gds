@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NetCDF-4 GDS Benchmark Visualization</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1900px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #7f8c8d;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .control-group {
+            min-width: 250px;
+        }
+
+        .control-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #34495e;
+            font-size: 0.95em;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+            width: 100%;
+        }
+
+        .file-input-wrapper input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+
+        .file-input-label {
+            display: block;
+            padding: 12px 20px;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+            text-align: center;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+        }
+
+        .file-input-label:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(17, 153, 142, 0.4);
+        }
+
+        select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1em;
+            background: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        select:hover {
+            border-color: #11998e;
+        }
+
+        select:focus {
+            outline: none;
+            border-color: #11998e;
+            box-shadow: 0 0 0 3px rgba(17, 153, 142, 0.1);
+        }
+
+        .checkbox-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            background: white;
+            border-radius: 6px;
+            transition: all 0.2s ease;
+        }
+
+        .checkbox-item:hover {
+            background: #f0f0f0;
+        }
+
+        .checkbox-item input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+            cursor: pointer;
+        }
+
+        .checkbox-item label {
+            cursor: pointer;
+            margin: 0;
+            flex-grow: 1;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            transition: transform 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .stat-label {
+            font-size: 0.9em;
+            opacity: 0.9;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 1.8em;
+            font-weight: bold;
+        }
+
+        .chart {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            margin-bottom: 30px;
+        }
+
+        .error {
+            background: #fee;
+            color: #c33;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #c33;
+        }
+
+        .loading {
+            text-align: center;
+            color: #7f8c8d;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(800px, 1fr));
+            gap: 30px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>NetCDF-4 GDS Benchmark Visualization</h1>
+        <p class="subtitle">Interactive Performance Analysis Dashboard (NetCDF-4 API with HDF5 VFD Backend)</p>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>Load CSV File</label>
+                <div class="file-input-wrapper">
+                    <input type="file" id="csvFile" accept=".csv">
+                    <label for="csvFile" class="file-input-label">📁 Choose CSV File</label>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <label>Select VFD Modes</label>
+                <div class="checkbox-group" id="vfdCheckboxes"></div>
+            </div>
+
+            <div class="control-group">
+                <label>Y-Axis Scale</label>
+                <select id="yScale">
+                    <option value="linear">Linear</option>
+                    <option value="log">Logarithmic</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>X-Axis Format</label>
+                <select id="xFormat">
+                    <option value="particles">Particle Count</option>
+                    <option value="power">2^N Format</option>
+                    <option value="bytes">Data Size</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="stats" class="stats"></div>
+        <div id="error" class="error" style="display:none;"></div>
+        <div id="loading" class="loading">Please load a CSV file to visualize the NetCDF-4 results</div>
+
+        <div class="chart-grid">
+            <div id="writeBandwidthChart" class="chart" style="display:none;"></div>
+            <div id="readBandwidthChart" class="chart" style="display:none;"></div>
+        </div>
+
+        <div class="chart-grid">
+            <div id="writeLatencyChart" class="chart" style="display:none;"></div>
+            <div id="readLatencyChart" class="chart" style="display:none;"></div>
+        </div>
+
+        <div id="comparisonChart" class="chart" style="display:none;"></div>
+        <div id="efficiencyChart" class="chart" style="display:none;"></div>
+    </div>
+
+    <script>
+        let data = [];
+        let selectedVFDs = new Set();
+
+        const colorMap = {
+            'sec2': '#e74c3c',
+            'gds': '#11998e',
+            'gds-native': '#2ecc71',
+            'gds-compat': '#3498db',
+            'direct': '#f39c12'
+        };
+
+        // Particle count to power of 2 mapping
+        const particleToPower = {
+            1024: 10, 2048: 11, 4096: 12, 8192: 13,
+            16384: 14, 32768: 15, 65536: 16, 131072: 17,
+            262144: 18, 524288: 19, 1048576: 20, 2097152: 21,
+            4194304: 22, 8388608: 23, 16777216: 24, 33554432: 25,
+            67108864: 26, 134217728: 27
+        };
+
+        function formatBytes(bytes) {
+            const val = parseFloat(bytes);
+            if (val >= 1073741824) {
+                const gb = val / 1073741824;
+                return gb.toFixed(2) + ' GB';
+            }
+            if (val >= 1048576) {
+                const mb = val / 1048576;
+                return mb.toFixed(2) + ' MB';
+            }
+            if (val >= 1024) {
+                const kb = val / 1024;
+                return kb.toFixed(2) + ' KB';
+            }
+            return val.toFixed(2) + ' B';
+        }
+
+        function formatBandwidth(bw) {
+            const val = parseFloat(bw);
+            if (val >= 1e9) {
+                return (val / 1e9).toFixed(2) + ' GB/s';
+            }
+            if (val >= 1e6) {
+                return (val / 1e6).toFixed(2) + ' MB/s';
+            }
+            if (val >= 1e3) {
+                return (val / 1e3).toFixed(2) + ' KB/s';
+            }
+            return val.toFixed(2) + ' B/s';
+        }
+
+        function getXAxisValue(row, format) {
+            const N = parseInt(row.N);
+            const dataSize = parseFloat(row['data size [byte]']);
+
+            switch (format) {
+                case 'power':
+                    return particleToPower[N] || Math.log2(N);
+                case 'bytes':
+                    return dataSize;
+                case 'particles':
+                default:
+                    return N;
+            }
+        }
+
+        function getXAxisLabel(format) {
+            switch (format) {
+                case 'power':
+                    return 'Particle Count (2^N)';
+                case 'bytes':
+                    return 'Data Size (bytes)';
+                case 'particles':
+                default:
+                    return 'Number of Particles';
+            }
+        }
+
+        function formatXAxisTick(value, format, N) {
+            switch (format) {
+                case 'power':
+                    return `2^${value}`;
+                case 'bytes':
+                    return formatBytes(value);
+                case 'particles':
+                default:
+                    return value.toLocaleString();
+            }
+        }
+
+        function parseCSV(text) {
+            const lines = text.trim().split('\n');
+            const headers = lines[0].split(',');
+            const rows = [];
+
+            for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',');
+                const row = {};
+                headers.forEach((header, index) => {
+                    row[header] = values[index];
+                });
+                rows.push(row);
+            }
+
+            return rows;
+        }
+
+        function updateVFDCheckboxes() {
+            const vfds = [...new Set(data.map(row => row.VFD))];
+            const container = document.getElementById('vfdCheckboxes');
+            container.innerHTML = '';
+
+            vfds.forEach(vfd => {
+                const div = document.createElement('div');
+                div.className = 'checkbox-item';
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.id = `vfd-${vfd}`;
+                checkbox.value = vfd;
+                checkbox.checked = true;
+                selectedVFDs.add(vfd);
+                checkbox.addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        selectedVFDs.add(vfd);
+                    } else {
+                        selectedVFDs.delete(vfd);
+                    }
+                    updateCharts();
+                });
+
+                const label = document.createElement('label');
+                label.htmlFor = `vfd-${vfd}`;
+                label.textContent = vfd.toUpperCase();
+                label.style.color = colorMap[vfd] || '#333';
+                label.style.fontWeight = 'bold';
+
+                div.appendChild(checkbox);
+                div.appendChild(label);
+                container.appendChild(div);
+            });
+        }
+
+        function updateStats() {
+            const statsDiv = document.getElementById('stats');
+            const filteredData = data.filter(row => selectedVFDs.has(row.VFD));
+
+            if (filteredData.length === 0) {
+                statsDiv.innerHTML = '';
+                return;
+            }
+
+            const maxWriteBW = Math.max(...filteredData.map(row => parseFloat(row['bandwidth (write) [byte/s]'])));
+            const maxReadBW = Math.max(...filteredData.map(row => parseFloat(row['bandwidth (read) [byte/s]'])));
+
+            const maxWriteRow = filteredData.find(row => parseFloat(row['bandwidth (write) [byte/s]']) === maxWriteBW);
+            const maxReadRow = filteredData.find(row => parseFloat(row['bandwidth (read) [byte/s]']) === maxReadBW);
+
+            statsDiv.innerHTML = `
+                <div class="stat-card">
+                    <div class="stat-label">Max Write Bandwidth</div>
+                    <div class="stat-value">${formatBandwidth(maxWriteBW)}</div>
+                    <div class="stat-label" style="margin-top: 10px; font-size: 0.8em;">
+                        ${maxWriteRow.VFD.toUpperCase()} @ N=${parseInt(maxWriteRow.N).toLocaleString()}
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Max Read Bandwidth</div>
+                    <div class="stat-value">${formatBandwidth(maxReadBW)}</div>
+                    <div class="stat-label" style="margin-top: 10px; font-size: 0.8em;">
+                        ${maxReadRow.VFD.toUpperCase()} @ N=${parseInt(maxReadRow.N).toLocaleString()}
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total Tests</div>
+                    <div class="stat-value">${filteredData.length}</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">VFD Modes</div>
+                    <div class="stat-value">${selectedVFDs.size}</div>
+                </div>
+            `;
+        }
+
+        function createTrace(vfd, metric, xFormat) {
+            const vfdData = data.filter(row => row.VFD === vfd && selectedVFDs.has(vfd));
+
+            const x = vfdData.map(row => getXAxisValue(row, xFormat));
+            const y = vfdData.map(row => parseFloat(row[metric]));
+            const N = vfdData.map(row => parseInt(row.N));
+            const dataSize = vfdData.map(row => parseFloat(row['data size [byte]']));
+
+            const hoverText = vfdData.map((row, i) =>
+                `VFD: ${vfd.toUpperCase()}<br>` +
+                `Particles: ${N[i].toLocaleString()} (2^${particleToPower[N[i]]})<br>` +
+                `Data Size: ${formatBytes(dataSize[i])}<br>` +
+                `Value: ${metric.includes('bandwidth') ? formatBandwidth(y[i]) : y[i].toExponential(2) + ' s'}`
+            );
+
+            return {
+                x: x,
+                y: y,
+                mode: 'lines+markers',
+                name: vfd.toUpperCase(),
+                line: {
+                    color: colorMap[vfd] || '#333',
+                    width: 3
+                },
+                marker: {
+                    size: 8,
+                    symbol: vfd === 'gds-native' ? 'circle' :
+                        vfd === 'gds-compat' ? 'square' :
+                            vfd === 'sec2' ? 'diamond' :
+                                vfd === 'direct' ? 'triangle-up' : 'cross'
+                },
+                hovertext: hoverText,
+                hoverinfo: 'text'
+            };
+        }
+
+        function updateCharts() {
+            const yScale = document.getElementById('yScale').value;
+            const xFormat = document.getElementById('xFormat').value;
+
+            if (data.length === 0 || selectedVFDs.size === 0) {
+                return;
+            }
+
+            updateStats();
+
+            const vfds = [...selectedVFDs];
+            const xAxisTitle = getXAxisLabel(xFormat);
+
+            // Write Bandwidth Chart
+            const writeTraces = vfds.map(vfd => createTrace(vfd, 'bandwidth (write) [byte/s]', xFormat));
+            Plotly.newPlot('writeBandwidthChart', writeTraces, {
+                title: 'Write Bandwidth vs Particle Count',
+                xaxis: {
+                    title: xAxisTitle,
+                    type: xFormat === 'power' ? 'linear' : 'log',
+                    tickformat: xFormat === 'power' ? '' : ',',
+                },
+                yaxis: {
+                    title: 'Bandwidth (byte/s)',
+                    type: yScale,
+                    tickformat: '.2e'
+                },
+                hovermode: 'closest',
+                showlegend: true,
+                legend: { x: 0.02, y: 0.98 }
+            }, { responsive: true });
+
+            // Read Bandwidth Chart
+            const readTraces = vfds.map(vfd => createTrace(vfd, 'bandwidth (read) [byte/s]', xFormat));
+            Plotly.newPlot('readBandwidthChart', readTraces, {
+                title: 'Read Bandwidth vs Particle Count',
+                xaxis: {
+                    title: xAxisTitle,
+                    type: xFormat === 'power' ? 'linear' : 'log',
+                    tickformat: xFormat === 'power' ? '' : ',',
+                },
+                yaxis: {
+                    title: 'Bandwidth (byte/s)',
+                    type: yScale,
+                    tickformat: '.2e'
+                },
+                hovermode: 'closest',
+                showlegend: true,
+                legend: { x: 0.02, y: 0.98 }
+            }, { responsive: true });
+
+            // Write Latency Chart
+            const writeLatencyTraces = vfds.map(vfd => createTrace(vfd, 'latency (write) [s]', xFormat));
+            Plotly.newPlot('writeLatencyChart', writeLatencyTraces, {
+                title: 'Write Latency vs Particle Count',
+                xaxis: {
+                    title: xAxisTitle,
+                    type: xFormat === 'power' ? 'linear' : 'log',
+                    tickformat: xFormat === 'power' ? '' : ',',
+                },
+                yaxis: {
+                    title: 'Latency (s)',
+                    type: yScale,
+                    tickformat: '.2e'
+                },
+                hovermode: 'closest',
+                showlegend: true,
+                legend: { x: 0.02, y: 0.98 }
+            }, { responsive: true });
+
+            // Read Latency Chart
+            const readLatencyTraces = vfds.map(vfd => createTrace(vfd, 'latency (read) [s]', xFormat));
+            Plotly.newPlot('readLatencyChart', readLatencyTraces, {
+                title: 'Read Latency vs Particle Count',
+                xaxis: {
+                    title: xAxisTitle,
+                    type: xFormat === 'power' ? 'linear' : 'log',
+                    tickformat: xFormat === 'power' ? '' : ',',
+                },
+                yaxis: {
+                    title: 'Latency (s)',
+                    type: yScale,
+                    tickformat: '.2e'
+                },
+                hovermode: 'closest',
+                showlegend: true,
+                legend: { x: 0.02, y: 0.98 }
+            }, { responsive: true });
+
+            // Read vs Write Comparison
+            const comparisonTraces = [];
+            vfds.forEach(vfd => {
+                const vfdData = data.filter(row => row.VFD === vfd);
+                const x = vfdData.map(row => parseFloat(row['bandwidth (write) [byte/s]']));
+                const y = vfdData.map(row => parseFloat(row['bandwidth (read) [byte/s]']));
+                const N = vfdData.map(row => parseInt(row.N));
+
+                comparisonTraces.push({
+                    x: x,
+                    y: y,
+                    mode: 'markers',
+                    name: vfd.toUpperCase(),
+                    marker: {
+                        size: 10,
+                        color: colorMap[vfd] || '#333'
+                    },
+                    text: N.map(n => `N=${n.toLocaleString()}`),
+                    hovertemplate: '%{text}<br>Write: %{x:.2e} B/s<br>Read: %{y:.2e} B/s<extra></extra>'
+                });
+            });
+
+            // Add diagonal line
+            const maxBW = Math.max(
+                ...data.map(row => Math.max(
+                    parseFloat(row['bandwidth (write) [byte/s]']),
+                    parseFloat(row['bandwidth (read) [byte/s]'])
+                ))
+            );
+            comparisonTraces.push({
+                x: [0, maxBW],
+                y: [0, maxBW],
+                mode: 'lines',
+                name: 'Read = Write',
+                line: { dash: 'dash', color: 'gray', width: 2 },
+                showlegend: true,
+                hoverinfo: 'skip'
+            });
+
+            Plotly.newPlot('comparisonChart', comparisonTraces, {
+                title: 'Read vs Write Bandwidth Comparison',
+                xaxis: { title: 'Write Bandwidth (byte/s)', type: 'log', tickformat: '.2e' },
+                yaxis: { title: 'Read Bandwidth (byte/s)', type: 'log', tickformat: '.2e' },
+                hovermode: 'closest',
+                showlegend: true
+            }, { responsive: true });
+
+            // Efficiency Ratio Chart
+            const efficiencyTraces = vfds.map(vfd => {
+                const vfdData = data.filter(row => row.VFD === vfd);
+                const x = vfdData.map(row => getXAxisValue(row, xFormat));
+                const ratio = vfdData.map(row =>
+                    parseFloat(row['bandwidth (read) [byte/s]']) / parseFloat(row['bandwidth (write) [byte/s]'])
+                );
+                const N = vfdData.map(row => parseInt(row.N));
+
+                return {
+                    x: x,
+                    y: ratio,
+                    mode: 'lines+markers',
+                    name: vfd.toUpperCase(),
+                    line: { color: colorMap[vfd] || '#333', width: 3 },
+                    marker: { size: 8 },
+                    text: N.map(n => `N=${n.toLocaleString()}`),
+                    hovertemplate: '%{text}<br>Ratio: %{y:.2f}<extra></extra>'
+                };
+            });
+
+            Plotly.newPlot('efficiencyChart', efficiencyTraces, {
+                title: 'Read/Write Efficiency Ratio',
+                xaxis: {
+                    title: xAxisTitle,
+                    type: xFormat === 'power' ? 'linear' : 'log',
+                    tickformat: xFormat === 'power' ? '' : ',',
+                },
+                yaxis: { title: 'Read BW / Write BW', type: 'linear' },
+                hovermode: 'closest',
+                showlegend: true,
+                shapes: [{
+                    type: 'line',
+                    x0: 0, x1: 1, xref: 'paper',
+                    y0: 1, y1: 1,
+                    line: { dash: 'dash', color: 'gray', width: 2 }
+                }],
+                annotations: [{
+                    x: 0.5, xref: 'paper',
+                    y: 1, yref: 'y',
+                    text: 'Read = Write',
+                    showarrow: false,
+                    yshift: 10
+                }]
+            }, { responsive: true });
+
+            // Show all charts
+            document.getElementById('writeBandwidthChart').style.display = 'block';
+            document.getElementById('readBandwidthChart').style.display = 'block';
+            document.getElementById('writeLatencyChart').style.display = 'block';
+            document.getElementById('readLatencyChart').style.display = 'block';
+            document.getElementById('comparisonChart').style.display = 'block';
+            document.getElementById('efficiencyChart').style.display = 'block';
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        // Event Listeners
+        document.getElementById('csvFile').addEventListener('change', function (e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function (event) {
+                try {
+                    data = parseCSV(event.target.result);
+                    document.getElementById('error').style.display = 'none';
+                    updateVFDCheckboxes();
+                    updateCharts();
+                } catch (error) {
+                    document.getElementById('error').textContent = 'Error parsing CSV: ' + error.message;
+                    document.getElementById('error').style.display = 'block';
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        document.getElementById('yScale').addEventListener('change', updateCharts);
+        document.getElementById('xFormat').addEventListener('change', updateCharts);
+    </script>
+</body>
+
+</html>

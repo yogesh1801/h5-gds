@@ -1,0 +1,235 @@
+#!/bin/bash
+#PBS -q short-g
+#PBS -l select=1
+#PBS -l walltime=12:00:00
+#PBS -W group_list=jh250079
+#PBS -j oe
+#PBS -N h5gds_first_touch_gpu
+
+# ============================================
+# HDF5 First Touch GPU - Comprehensive VFD Benchmark
+# Tests: GDS Native, GDS Compatibility, SEC2, Direct I/O
+# Memory: malloc + GPU first-touch (pages backed by GPU HBM)
+# ============================================
+
+# ============================================
+# BENCHMARK CONFIGURATION
+# ============================================
+# Particle counts (file sizes) - N values (powers of 2)
+NUM_VALUES=(
+    1024         # 2^10  (~37 KB)
+    2048         # 2^11  (~74 KB)
+    4096         # 2^12  (~148 KB)
+    8192         # 2^13  (~295 KB)
+    16384        # 2^14  (~590 KB)
+    32768        # 2^15  (~1.18 MB)
+    65536        # 2^16  (~2.36 MB)
+    131072       # 2^17  (~4.72 MB)
+    262144       # 2^18  (~9.44 MB)
+    524288       # 2^19  (~18.9 MB)
+    1048576      # 2^20  (~37.7 MB)
+    2097152      # 2^21  (~75.5 MB)
+    4194304      # 2^22  (~151 MB)
+    8388608      # 2^23  (~302 MB)
+    16777216     # 2^24  (~604 MB)
+    33554432     # 2^25  (~1.21 GB)
+    67108864     # 2^26  (~2.42 GB)
+    134217728    # 2^27  (~4.83 GB)
+)
+
+# VFD modes to test
+VFD_MODES=(gds-native gds-compat sec2 direct)
+
+# GDS configuration files
+GDS_NATIVE_JSON="${PBS_O_WORKDIR}/disable_compat.json"
+GDS_COMPAT_JSON="${PBS_O_WORKDIR}/force_compat.json"
+
+# Timeout for each benchmark run
+ELAPSE_MAX=600s
+
+# ============================================
+# ENVIRONMENT SETUP
+# ============================================
+module purge
+module load cuda
+module unload nvidia
+
+echo "=== Loaded Modules ==="
+module list
+echo ""
+
+# ============================================
+# GPU CONFIGURATION (Fixed at GPU 0)
+# ============================================
+GPU_ID=0
+export CPATH=/work/jh250079/n14001/vfd-gds/src:$CPATH
+
+echo "=== Using GPU $GPU_ID ==="
+
+# Get GPU PCIe bus ID and NUMA node
+BUS_ID=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | tr '[:upper:]' '[:lower:]' | sed 's/^0\{0,\}\([0-9]\{4\}\)/\1/')
+NUMA_NODE=$(cat /sys/bus/pci/devices/$BUS_ID/numa_node)
+
+echo "GPU $GPU_ID: BUS_ID=$BUS_ID, NUMA_NODE=$NUMA_NODE"
+
+# Display GPU topology
+echo "=== GPU Topology ==="
+nvidia-smi topo -m
+echo ""
+
+# Run GDS health check
+if [ -f "$CUDA_HOME/gds/tools/gdscheck" ]; then
+    echo "=== GPUDirect Storage Health Check ==="
+    numactl --localalloc ${CUDA_PATH}/gds/tools/gdscheck -p
+    echo ""
+else
+    echo "WARNING: gdscheck not found, skipping GDS verification"
+fi
+
+# ============================================
+# DIRECTORY SETUP
+# ============================================
+ROOT="/local/${USER}/gpu${GPU_ID}"
+TEMP="${PBS_O_WORKDIR}/temp"
+DUMP="${PBS_O_WORKDIR}/results"
+
+mkdir -p "${ROOT}"
+mkdir -p "${TEMP}"
+mkdir -p "${DUMP}"
+
+# Copy executable and prepare directories
+cd "${ROOT}"
+cp -r ${PBS_O_WORKDIR}/bin .
+mkdir -p dat log
+
+echo "Working directory: ${ROOT}"
+echo "Results will be saved to: ${DUMP}"
+echo ""
+
+# ============================================
+# PARAMETER SWEEP
+# ============================================
+TOTAL_RUNS=$((${#NUM_VALUES[@]} * ${#VFD_MODES[@]}))
+CURRENT_RUN=0
+
+echo "=========================================="
+echo "HDF5 First Touch GPU - Comprehensive VFD Benchmark"
+echo "=========================================="
+echo "Configuration:"
+echo "  Memory allocation: malloc + GPU first-touch"
+echo "  File block size (fblk): $FBLK bytes"
+echo "  Copy buffer size (cbuf): $CBUF bytes"
+echo "  Memory boundary (memb): $MEMB bytes"
+echo ""
+echo "Total configurations to test: ${TOTAL_RUNS}"
+echo "  - VFD modes: ${#VFD_MODES[@]}"
+echo "  - NUM values: ${#NUM_VALUES[@]}"
+echo ""
+
+# Loop over VFD modes
+for VFD_MODE in "${VFD_MODES[@]}"
+do
+    echo "========================================="
+    echo "VFD MODE: ${VFD_MODE}"
+    echo "========================================="
+
+    # Configure GDS mode and set actual VFD driver
+    if [ "$VFD_MODE" == "gds-native" ]; then
+        export CUFILE_ENV_PATH_JSON="${GDS_NATIVE_JSON}"
+        ACTUAL_VFD="gds"
+        echo "Using GDS Native mode (disable_compat.json)"
+    elif [ "$VFD_MODE" == "gds-compat" ]; then
+        export CUFILE_ENV_PATH_JSON="${GDS_COMPAT_JSON}"
+        ACTUAL_VFD="gds"
+        echo "Using GDS Compat mode (force_compat.json)"
+    elif [ "$VFD_MODE" == "direct" ]; then
+        unset CUFILE_ENV_PATH_JSON
+        ACTUAL_VFD="direct"
+        echo "Using Direct I/O VFD"
+    else
+        # For sec2, no JSON needed
+        unset CUFILE_ENV_PATH_JSON
+        ACTUAL_VFD="$VFD_MODE"
+        echo "Using SEC2 VFD (POSIX I/O)"
+    fi
+    
+    echo "CUFILE_ENV_PATH_JSON: ${CUFILE_ENV_PATH_JSON:-not set}"
+    echo ""
+
+    # Loop over particle counts
+    for NUM in "${NUM_VALUES[@]}"
+    do
+        CURRENT_RUN=$((CURRENT_RUN + 1))
+
+        echo ""
+        echo "--- Run ${CURRENT_RUN}/${TOTAL_RUNS} ---"
+        echo "MODE=$VFD_MODE, VFD=$ACTUAL_VFD, NUM=$NUM, FBLK=${FBLK}B, CBUF=${CBUF}B, MEMB=${MEMB}B"
+
+        # Run benchmark with NUMA affinity
+        timeout ${ELAPSE_MAX} numactl --localalloc \
+            bin/h5gds \
+            --asis \
+            --num $NUM \
+            --vfd $ACTUAL_VFD
+
+        EXIT_CODE=$?
+        if [ $EXIT_CODE -eq 124 ]; then
+            echo "WARNING: Benchmark timed out after ${ELAPSE_MAX}"
+        elif [ $EXIT_CODE -ne 0 ]; then
+            echo "ERROR: Benchmark failed with exit code $EXIT_CODE"
+        fi
+
+        # Sync results to temp directory periodically
+        rsync -av log/ ${TEMP}/log/
+        
+        # Sleep to allow system to stabilize between runs
+        sleep 1
+
+    done  # NUM loop
+
+    echo ""
+done  # VFD loop
+
+# ============================================
+# CLEANUP AND RESULTS
+# ============================================
+echo "=== Copying final results to ${DUMP}/ ==="
+rsync -av log/ ${DUMP}/log/
+cp log/h5gds_benchmark.csv ${DUMP}/h5gds_first_touch_gpu_all.csv
+
+# Copy cuFile logs if they exist (GDS diagnostic logs)
+if [ -f "${ROOT}/cufile.log" ]; then
+    echo "Copying cufile.log from working directory..."
+    cp ${ROOT}/cufile.log ${DUMP}/cufile_first_touch_gpu_all.log
+fi
+
+if [ -f "/tmp/cufile.log" ]; then
+    echo "Copying cufile.log from /tmp..."
+    cp /tmp/cufile.log ${DUMP}/cufile_tmp_first_touch_gpu_all.log
+fi
+
+# Copy any cufile logs with timestamps
+find ${ROOT} -name "cufile*.log" -exec cp {} ${DUMP}/ \;
+find /tmp -name "cufile*.log" -user $(whoami) -exec cp {} ${DUMP}/ \; 2>/dev/null
+
+echo "=== Cleaning up scratch space ==="
+rm -rf ${ROOT}
+rm -rf ${TEMP}
+
+echo ""
+echo "=== Job Finish: $(date) ==="
+echo "Results saved to: ${DUMP}/h5gds_first_touch_gpu_all.csv"
+
+# Display summary statistics
+if [ -f "${DUMP}/h5gds_first_touch_gpu_all.csv" ]; then
+    echo ""
+    echo "=== Benchmark Summary ==="
+    echo "Total rows: $(wc -l < ${DUMP}/h5gds_first_touch_gpu_all.csv)"
+    echo "Total tests run: ${CURRENT_RUN}"
+    echo "VFDs tested: ${VFD_MODES[@]}"
+    echo ""
+    echo "=== First 5 rows of results ==="
+    head -6 ${DUMP}/h5gds_first_touch_gpu_all.csv
+fi
+
+exit 0

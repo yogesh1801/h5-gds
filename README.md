@@ -105,11 +105,15 @@ cmake -S /work/jh250079/n14001/h5-gds \
       -DVFD_GDS_LIB=/work/jh250079/n14001/vfd-gds/build/bin \
       -DCUDA_SAMPLES_DIR=/work/jh250079/n14001/cuda-samples/Common \
       -DHDF5_ROOT=/work/jh250079/n14001/hdf5_install \
+      -DCMAKE_PREFIX_PATH="/work/jh250079/n14001/netcdf_install;/work/jh250079/n14001/hdf5_install" \
       -DTARGET_GPU=NVIDIA_CC90 \
-      -DUSE_SYSTEM_MALLOC=ON
+      -DFIRST_TOUCH_MODE=GPU
+
 
 
 export CPATH=/work/jh250079/n14001/vfd-gds/src:$CPATH
+export CPATH=/work/jh250079/n14001/netcdf_install/include:$CPATH
+export LIBRARY_PATH=/work/jh250079/n14001/netcdf_install/lib:$LIBRARY_PATH
 export LD_LIBRARY_PATH=/work/jh250079/n14001/vfd-gds/build/bin:$LD_LIBRARY_PATH
 
 
