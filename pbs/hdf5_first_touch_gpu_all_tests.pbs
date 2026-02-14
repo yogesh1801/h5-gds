@@ -169,7 +169,8 @@ do
         timeout ${ELAPSE_MAX} numactl --localalloc \
             bin/h5gds \
             --compute \
-            --runs 5 \
+            --warmup-runs 2 \
+            --runs 3 \
             --asis \
             --num $NUM \
             --vfd $ACTUAL_VFD

@@ -176,6 +176,11 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     float* d_ke_total = nullptr;
     checkCudaErrors(cudaMalloc(&d_ke_total, sizeof(float)));
 
+    // Untimed warm-up runs (1–2 iterations)
+    for (int w = 0; w < 2; w++) {
+      compute_kinetic_energy_step(num, pos, vel_xy, vel_z, d_ke_total);
+    }
+
     constexpr auto benchmark = [](const auto func) noexcept(false) {
       struct timespec ini;
       clock_gettime(CLOCK_MONOTONIC, &ini);
@@ -187,9 +192,11 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 
     for (size_t run = 0UL; run < num_runs; run++) {
       const auto elapse = benchmark([&]() {
+        checkCudaErrors(cudaDeviceSynchronize());
         compute_kinetic_energy_step(num, pos, vel_xy, vel_z, d_ke_total);
       });
       compute_times.push_back(elapse);
+      std::cout << "  compute run " << run << ": " << elapse << " s" << std::endl;
     }
 
     checkCudaErrors(cudaFree(d_ke_total));
@@ -413,6 +420,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
       h5write.execute();
     });
     write_times.push_back(elapse_write);
+    std::cout << "  write run " << run << ": " << elapse_write << " s (" << name << ")" << std::endl;
 
     util::hdf5::write_attr(hdf5_dataspace_1, target, "num", &num);
     H5Fclose(target);
@@ -474,6 +482,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 #endif
     });
     read_times.push_back(elapse_read);
+    std::cout << "  read run " << run << ": " << elapse_read << " s (" << name << ")" << std::endl;
 
     H5Fclose(target);
 
