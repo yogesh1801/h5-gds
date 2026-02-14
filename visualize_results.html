@@ -262,6 +262,9 @@
                 <div id="readLatency" class="chart-content"></div>
             </div>
             <div class="chart-wrapper">
+                <div id="computeLatency" class="chart-content"></div>
+            </div>
+            <div class="chart-wrapper">
                 <div id="comparison" class="chart-content"></div>
             </div>
             <div class="chart-wrapper">
@@ -524,6 +527,7 @@
             plotMetric(filtered, 'readBandwidth', 'Read Bandwidth', 'bandwidth (read)', 'GB/s', 1e9, yScale);
             plotMetric(filtered, 'writeLatency', 'Write Latency', 'latency (write)', 'ms', 0.001, yScale, true); // Latency is in seconds, convert to ms
             plotMetric(filtered, 'readLatency', 'Read Latency', 'latency (read)', 'ms', 0.001, yScale, true);
+            plotMetric(filtered, 'computeLatency', 'Compute Latency', 'latency (compute)', 'ms', 0.001, yScale, true);
 
             plotComparison(filtered);
             plotEfficiency(filtered);

@@ -168,6 +168,8 @@ do
         # Run benchmark with NUMA affinity
         timeout ${ELAPSE_MAX} numactl --localalloc \
             bin/h5gds \
+            --compute \
+            --runs 5 \
             --asis \
             --num $NUM \
             --vfd $ACTUAL_VFD

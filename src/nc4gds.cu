@@ -63,6 +63,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
       "radius", boost::program_options::value<float>()->default_value(1.0), "radius of the system")(
       "mass", boost::program_options::value<float>()->default_value(1.0), "total mass of the system")(
       "runs", boost::program_options::value<size_t>()->default_value(3), "number of benchmark runs for min/max/avg")(
+      "warmup-runs", boost::program_options::value<size_t>()->default_value(0), "number of warm-up I/O runs (discarded, no timing)")(
       "help,h", "Help");
   // read input arguments
   boost::program_options::variables_map vm;
@@ -80,6 +81,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   const auto mass = vm["mass"].as<float>();
   const auto skip = vm["skip"].as<bool>();
   const auto num_runs = vm["runs"].as<size_t>();
+  const auto warmup_runs = vm["warmup-runs"].as<size_t>();
   vm.clear();
   if (num_runs < 1UL) {
     std::cerr << "runs must be >= 1" << std::endl;
@@ -187,6 +189,68 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 #endif
 
   bool success = true;
+
+  //
+  // Warm-up runs (discard timings)
+  //
+  for (size_t w = 0UL; w < warmup_runs; w++) {
+    const auto filename_w = (dat_dir / (boost::lexical_cast<std::string>(boost::uuids::random_generator()()) + ".nc")).string();
+
+    int ncid_w;
+#if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
+    checkCudaErrors(cudaMemcpy(position_host, position, num * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(velocity_host, velocity, num * 3 * sizeof(float), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(mass_host, mass_buf, num * sizeof(float), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(id_host, id, num * sizeof(type::idx), cudaMemcpyDeviceToHost));
+#endif
+    NC_CHECK(nc_create(filename_w.c_str(), NC_NETCDF4 | NC_CLOBBER, &ncid_w));
+    int dim_n_w, dim_3_w;
+    NC_CHECK(nc_def_dim(ncid_w, "num_particles", num, &dim_n_w));
+    NC_CHECK(nc_def_dim(ncid_w, "coord", 3, &dim_3_w));
+    int dims_n3_w[2] = {dim_n_w, dim_3_w};
+    int var_pos_w, var_vel_w, var_mass_w, var_id_w;
+    NC_CHECK(nc_def_var(ncid_w, "position", NC_FLOAT, 2, dims_n3_w, &var_pos_w));
+    NC_CHECK(nc_def_var(ncid_w, "velocity", NC_FLOAT, 2, dims_n3_w, &var_vel_w));
+    NC_CHECK(nc_def_var(ncid_w, "mass", NC_FLOAT, 1, &dim_n_w, &var_mass_w));
+    NC_CHECK(nc_def_var(ncid_w, "id", NC_UINT64, 1, &dim_n_w, &var_id_w));
+    unsigned long long num_ull_w = static_cast<unsigned long long>(num);
+    unsigned long long id_ull_w = static_cast<unsigned long long>(num);
+    NC_CHECK(nc_put_att_ulonglong(ncid_w, NC_GLOBAL, "num", NC_UINT64, 1, &num_ull_w));
+    NC_CHECK(nc_put_att_ulonglong(ncid_w, NC_GLOBAL, "id", NC_UINT64, 1, &id_ull_w));
+    NC_CHECK(nc_put_var_float(ncid_w, var_pos_w, position_write));
+    NC_CHECK(nc_put_var_float(ncid_w, var_vel_w, velocity_write));
+    NC_CHECK(nc_put_var_float(ncid_w, var_mass_w, mass_write));
+    NC_CHECK(nc_put_var_ulonglong(ncid_w, var_id_w, reinterpret_cast<const unsigned long long*>(id_write)));
+    NC_CHECK(nc_close(ncid_w));
+
+    const int fd_w = open(filename_w.c_str(), O_RDONLY);
+    if (fd_w != -1) {
+      fsync(fd_w);
+      posix_fadvise(fd_w, 0, 0, POSIX_FADV_DONTNEED);
+      close(fd_w);
+    }
+
+    int ncid_r;
+    NC_CHECK(nc_open(filename_w.c_str(), NC_NOWRITE, &ncid_r));
+    int var_pos_r, var_vel_r, var_mass_r, var_id_r;
+    NC_CHECK(nc_inq_varid(ncid_r, "position", &var_pos_r));
+    NC_CHECK(nc_inq_varid(ncid_r, "velocity", &var_vel_r));
+    NC_CHECK(nc_inq_varid(ncid_r, "mass", &var_mass_r));
+    NC_CHECK(nc_inq_varid(ncid_r, "id", &var_id_r));
+    NC_CHECK(nc_get_var_float(ncid_r, var_pos_r, position_read_ptr));
+    NC_CHECK(nc_get_var_float(ncid_r, var_vel_r, velocity_read_ptr));
+    NC_CHECK(nc_get_var_float(ncid_r, var_mass_r, mass_read_ptr));
+    NC_CHECK(nc_get_var_ulonglong(ncid_r, var_id_r, reinterpret_cast<unsigned long long*>(id_read_ptr)));
+    NC_CHECK(nc_close(ncid_r));
+#if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
+    checkCudaErrors(cudaMemcpy(position_read, position_read_host, num * 3 * sizeof(float), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(velocity_read, velocity_read_host, num * 3 * sizeof(float), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(mass_read, mass_read_host, num * sizeof(float), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(id_read, id_read_host, num * sizeof(type::idx), cudaMemcpyHostToDevice));
+#endif
+
+    boost::filesystem::remove(filename_w);
+  }
 
   //
   // Phase 1: write loop (create file, write, nc_close, fsync, posix_fadvise for each run)

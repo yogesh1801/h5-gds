@@ -84,6 +84,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
       "mass", boost::program_options::value<std::remove_const_t<decltype(newton)>>()->default_value(1.0), "total mass of the system")(
       "xdmf", boost::program_options::bool_switch()->default_value(false), "generate XDMF file to visualize the snapshot")(
       "runs", boost::program_options::value<size_t>()->default_value(3), "number of benchmark runs for min/max/avg")(
+      "warmup-runs", boost::program_options::value<size_t>()->default_value(0), "number of warm-up I/O runs (discarded, no timing)")(
       "compute", boost::program_options::bool_switch()->default_value(false), "enable compute benchmark (kinetic energy kernel, num_runs iterations)")(
       "help,h", "Help");
   // read input arguments
@@ -107,6 +108,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   const auto asis = vm["asis"].as<bool>();
   const auto write_xdmf = vm["xdmf"].as<bool>();
   const auto num_runs = vm["runs"].as<size_t>();
+  const auto warmup_runs = vm["warmup-runs"].as<size_t>();
   const auto do_compute = vm["compute"].as<bool>();
   vm.clear();
   if (num_runs < 1UL) {
@@ -309,6 +311,71 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 
   const auto FPtype_read = util::hdf5::h5type(*vel_z_read);
   auto all_valid = true;
+
+  // Warm-up runs (discard timings)
+  for (size_t w = 0UL; w < warmup_runs; w++) {
+    auto uuid_w = boost::uuids::random_generator{}();
+    const auto name_w = "dat/" + boost::lexical_cast<std::string>(uuid_w) + ".h5";
+
+    auto target_w = H5Fcreate(name_w.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+    h5write.commit(hdf5_dataspace_N, target_w, "id", util::hdf5::h5type(*idx), idx_write);
+    if (!asis) {
+      h5write.commit(hdf5_dataspace_Nx3, target_w, "velocity", FPtype, vel_xy_write, hdf5_dataspace_Nx2, hdf5_dataspace_Nx2_3);
+      h5write.commit(vel_z_write, h5write.get_last_dataset(), FPtype, hdf5_dataspace_Nx1, hdf5_dataspace_Nx1_3);
+      h5write.commit(hdf5_dataspace_Nx3, target_w, "position", FPtype, pos_write, hdf5_dataspace_Nx3_4, hdf5_dataspace_Nx3);
+      h5write.commit(hdf5_dataspace_Nx1, target_w, "mass", FPtype, pos_write, hdf5_dataspace_Nx1_4, hdf5_dataspace_Nx1);
+    } else {
+      h5write.commit(hdf5_dataspace_N, target_w, "pos", util::hdf5::h5type(*pos), pos_write);
+      h5write.commit(hdf5_dataspace_N, target_w, "vel_xy", util::hdf5::h5type(*vel_xy), vel_xy_write);
+      h5write.commit(hdf5_dataspace_N, target_w, "vel_z", util::hdf5::h5type(*vel_z), vel_z_write);
+    }
+#if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
+    if (vfd_name == "sec2" || vfd_name == "direct") {
+      auto size_w = round_up(num, NTHREADS);
+      size_w = round_up(size_w, THREAD_NUM);
+      checkCudaErrors(cudaMemcpy(idx_host, idx, size_w * sizeof(type::idx), cudaMemcpyDeviceToHost));
+      checkCudaErrors(cudaMemcpy(pos_host, pos, size_w * sizeof(type::pos), cudaMemcpyDeviceToHost));
+      checkCudaErrors(cudaMemcpy(vel_xy_host, vel_xy, size_w * sizeof(type::vel_xy), cudaMemcpyDeviceToHost));
+      checkCudaErrors(cudaMemcpy(vel_z_host, vel_z, size_w * sizeof(type::vel_z), cudaMemcpyDeviceToHost));
+    }
+#endif
+    h5write.execute();
+    util::hdf5::write_attr(hdf5_dataspace_1, target_w, "num", &num);
+    H5Fclose(target_w);
+
+    const int fd_w = open(name_w.c_str(), O_RDONLY);
+    if (fd_w != -1) {
+      fsync(fd_w);
+      posix_fadvise(fd_w, 0, 0, POSIX_FADV_DONTNEED);
+      close(fd_w);
+    }
+
+    target_w = H5Fopen(name_w.c_str(), H5F_ACC_RDONLY, fapl);
+    h5read.commit(target_w, "id", util::hdf5::h5type(*idx_read), idx_read_ptr);
+    if (!asis) {
+      h5read.commit(target_w, "velocity", FPtype_read, vel_xy_read_ptr, hdf5_dataspace_Nx2, hdf5_dataspace_Nx2_3);
+      h5read.commit(vel_z_read_ptr, h5read.get_last_dataset(), FPtype_read, hdf5_dataspace_Nx1, hdf5_dataspace_Nx1_3);
+      h5read.commit(target_w, "position", FPtype_read, pos_read_ptr, hdf5_dataspace_Nx3_4, hdf5_dataspace_Nx3);
+      h5read.commit(target_w, "mass", FPtype_read, pos_read_ptr, hdf5_dataspace_Nx1_4, hdf5_dataspace_Nx1);
+    } else {
+      h5read.commit(target_w, "pos", util::hdf5::h5type(*pos_read), pos_read_ptr);
+      h5read.commit(target_w, "vel_xy", util::hdf5::h5type(*vel_xy_read), vel_xy_read_ptr);
+      h5read.commit(target_w, "vel_z", util::hdf5::h5type(*vel_z_read), vel_z_read_ptr);
+    }
+    h5read.execute();
+#if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
+    if (vfd_name == "sec2" || vfd_name == "direct") {
+      auto size_w = round_up(num, NTHREADS);
+      size_w = round_up(size_w, THREAD_NUM);
+      checkCudaErrors(cudaMemcpy(idx_read, idx_read_host, size_w * sizeof(type::idx), cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(pos_read, pos_read_host, size_w * sizeof(type::pos), cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(vel_xy_read, vel_xy_read_host, size_w * sizeof(type::vel_xy), cudaMemcpyHostToDevice));
+      checkCudaErrors(cudaMemcpy(vel_z_read, vel_z_read_host, size_w * sizeof(type::vel_z), cudaMemcpyHostToDevice));
+    }
+#endif
+    H5Fclose(target_w);
+    boost::filesystem::remove(name_w);
+  }
 
   // Phase 1: write loop (create file, write, H5Fclose, fsync, posix_fadvise for each run)
   for (size_t run = 0UL; run < num_runs; run++) {
