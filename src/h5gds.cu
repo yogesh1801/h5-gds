@@ -246,7 +246,6 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 #endif
 
     h5write.execute();
-    H5Fflush(target, H5F_SCOPE_GLOBAL);
   });
   // write attribute
   util::hdf5::write_attr(hdf5_dataspace_1, target, "num", &num);
@@ -256,12 +255,20 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   // Explicitly sync the file to disk to ensure raw read performance
   const int fd = open(name.c_str(), O_RDONLY);
   if (fd != -1) {
+    // Ensure data is on disk
     fsync(fd);
-    close(fd);
-  } else {
-    std::cerr << "Warning: Failed to open file for explicit fsync: " << name << std::endl;
-  }
 
+    // Drop file pages from page cache
+    int ret = posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    if (ret != 0) {
+      std::cerr << "Warning: posix_fadvise failed: " << strerror(ret) << std::endl;
+    }
+
+    close(fd);
+
+  } else {
+    std::cerr << "Warning: Failed to open file for cache drop: " << name << std::endl;
+  }
   // generate XDMF file if requested
   if (!asis && write_xdmf) {
     std::ofstream xml("dat/" + series + ".xdmf", std::ios::out);
