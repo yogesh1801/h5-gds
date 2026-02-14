@@ -180,7 +180,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   NC_CHECK(nc_close(ncid));
 
   // Explicitly sync the file to disk to ensure raw read performance
-  const int fd = open(name.c_str(), O_RDONLY);
+  const int fd = open(filename.c_str(), O_RDONLY);
   if (fd != -1) {
     // Ensure data is on disk
     fsync(fd);
