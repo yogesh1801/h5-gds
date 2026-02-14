@@ -35,6 +35,7 @@
 
 #include "allocate.cuh"
 #include "common.cuh"
+#include "compute.cuh"
 #include "generate.cuh"
 #include "hdf5.hpp"
 
@@ -83,6 +84,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
       "mass", boost::program_options::value<std::remove_const_t<decltype(newton)>>()->default_value(1.0), "total mass of the system")(
       "xdmf", boost::program_options::bool_switch()->default_value(false), "generate XDMF file to visualize the snapshot")(
       "runs", boost::program_options::value<size_t>()->default_value(3), "number of benchmark runs for min/max/avg")(
+      "compute", boost::program_options::bool_switch()->default_value(false), "enable compute benchmark (kinetic energy kernel, num_runs iterations)")(
       "help,h", "Help");
   // read input arguments
   boost::program_options::variables_map vm;
@@ -105,6 +107,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   const auto asis = vm["asis"].as<bool>();
   const auto write_xdmf = vm["xdmf"].as<bool>();
   const auto num_runs = vm["runs"].as<size_t>();
+  const auto do_compute = vm["compute"].as<bool>();
   vm.clear();
   if (num_runs < 1UL) {
     std::cerr << "runs must be >= 1" << std::endl;
@@ -163,6 +166,37 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 #endif
 
   set_uniform_sphere(num, pos, vel_xy, vel_z, idx, mass, radius, virial, newton);
+
+  // Compute benchmark: kinetic energy kernel, num_runs iterations (when --compute)
+  std::vector<double> compute_times;
+  if (do_compute) {
+    compute_times.reserve(num_runs);
+    float* d_ke_total = nullptr;
+    checkCudaErrors(cudaMalloc(&d_ke_total, sizeof(float)));
+
+    constexpr auto benchmark = [](const auto func) noexcept(false) {
+      struct timespec ini;
+      clock_gettime(CLOCK_MONOTONIC, &ini);
+      func();
+      struct timespec end;
+      clock_gettime(CLOCK_MONOTONIC, &end);
+      return (std::fma(1.0e-9, static_cast<double>(end.tv_nsec - ini.tv_nsec), end.tv_sec - ini.tv_sec));
+    };
+
+    for (size_t run = 0UL; run < num_runs; run++) {
+      const auto elapse = benchmark([&]() {
+        compute_kinetic_energy_step(num, pos, vel_xy, vel_z, d_ke_total);
+      });
+      compute_times.push_back(elapse);
+    }
+
+    checkCudaErrors(cudaFree(d_ke_total));
+
+    const auto elapse_compute_min = *std::min_element(compute_times.begin(), compute_times.end());
+    const auto elapse_compute_max = *std::max_element(compute_times.begin(), compute_times.end());
+    const auto elapse_compute_avg = std::accumulate(compute_times.begin(), compute_times.end(), 0.0) / static_cast<double>(compute_times.size());
+    std::cout << "Compute (kinetic energy, " << num_runs << " runs): min " << elapse_compute_min << " / max " << elapse_compute_max << " / avg " << elapse_compute_avg << " s" << std::endl;
+  }
 
   constexpr auto benchmark = [](const auto func) noexcept(false) {
     // cudaDeviceSynchronize();
@@ -493,6 +527,9 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
       output << ",bandwidth (read) min [byte/s]";
       output << ",bandwidth (read) max [byte/s]";
       output << ",bandwidth (read) avg [byte/s]";
+      output << ",latency (compute) min [s]";
+      output << ",latency (compute) max [s]";
+      output << ",latency (compute) avg [s]";
       output << ",filename";
       output << std::endl;
     }
@@ -519,6 +556,16 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     output << "," << datasize / elapse_read_max;
     output << "," << datasize / elapse_read_min;
     output << "," << datasize / elapse_read_avg;
+    if (do_compute && !compute_times.empty()) {
+      const auto elapse_compute_min = *std::min_element(compute_times.begin(), compute_times.end());
+      const auto elapse_compute_max = *std::max_element(compute_times.begin(), compute_times.end());
+      const auto elapse_compute_avg = std::accumulate(compute_times.begin(), compute_times.end(), 0.0) / static_cast<double>(compute_times.size());
+      output << "," << elapse_compute_min;
+      output << "," << elapse_compute_max;
+      output << "," << elapse_compute_avg;
+    } else {
+      output << ",,,";
+    }
     output << "," << (file_names.empty() ? "" : file_names.front());
     output << std::endl;
     output.close();

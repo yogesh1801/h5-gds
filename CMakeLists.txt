@@ -62,7 +62,7 @@ project(h5gds CXX CUDA)
 message(STATUS "Generate ${PROJECT_NAME} ...")
 
 # define the executable
-set(SOURCES ${PROJECT_SOURCE_DIR}/src/h5gds.cu ${PROJECT_SOURCE_DIR}/src/allocate.cu ${PROJECT_SOURCE_DIR}/src/generate.cu)
+set(SOURCES ${PROJECT_SOURCE_DIR}/src/h5gds.cu ${PROJECT_SOURCE_DIR}/src/allocate.cu ${PROJECT_SOURCE_DIR}/src/generate.cu ${PROJECT_SOURCE_DIR}/src/compute.cu)
 
 add_executable(${PROJECT_NAME}
   ${SOURCES}
