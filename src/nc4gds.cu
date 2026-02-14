@@ -21,6 +21,7 @@
 #include <boost/uuid/uuid_generators.hpp>  // boost::uuids::random_generator
 #include <boost/uuid/uuid_io.hpp>          // convert boost::uuids::uuid to std::string
 #include <cstdlib>                         // std::exit
+#include <cstring>                         // strerror
 #include <fstream>                         // std::ofstream
 #include <iostream>                        // std::cout
 #include <string>                          // std::string

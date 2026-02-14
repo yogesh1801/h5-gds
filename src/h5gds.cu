@@ -23,6 +23,7 @@
 #include <boost/uuid/uuid_generators.hpp>  // boost::uuids::random_generator
 #include <boost/uuid/uuid_io.hpp>          // convert boost::uuids::uuid to std::string
 #include <cstdlib>                         // std::exit
+#include <cstring>                         // strerror
 #include <fstream>                         // std::ofstream
 #include <iomanip>                         // std::setw
 #include <iostream>                        // std::cout
@@ -256,6 +257,10 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   const int fd = open(name.c_str(), O_RDONLY);
   if (fd != -1) {
     fsync(fd);
+    int ret = posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    if (ret != 0) {
+      std::cerr << "Warning: posix_fadvise failed: " << strerror(ret) << std::endl;
+    }
     close(fd);
   } else {
     std::cerr << "Warning: Failed to open file for explicit fsync: " << name << std::endl;
