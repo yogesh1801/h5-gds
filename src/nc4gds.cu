@@ -196,6 +196,8 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   } else {
     std::cerr << "Warning: Failed to open file for cache drop: " << filename << std::endl;
   }
+
+  sleep(5);
   //
   // BENCHMARK: NetCDF-4 READ
   //
