@@ -85,6 +85,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
       "xdmf", boost::program_options::bool_switch()->default_value(false), "generate XDMF file to visualize the snapshot")(
       "runs", boost::program_options::value<size_t>()->default_value(3), "number of benchmark runs for min/max/avg")(
       "warmup-runs", boost::program_options::value<size_t>()->default_value(0), "number of warm-up I/O runs (discarded, no timing)")(
+      "align", boost::program_options::bool_switch()->default_value(false), "use 4KB page-aligned allocations (malloc/first-touch and host buffers)")(
       "compute", boost::program_options::bool_switch()->default_value(false), "enable compute benchmark (kinetic energy kernel, num_runs iterations)")(
       "help,h", "Help");
   // read input arguments
@@ -109,6 +110,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   const auto write_xdmf = vm["xdmf"].as<bool>();
   const auto num_runs = vm["runs"].as<size_t>();
   const auto warmup_runs = vm["warmup-runs"].as<size_t>();
+  const auto use_align = vm["align"].as<bool>();
   const auto do_compute = vm["compute"].as<bool>();
   vm.clear();
   if (num_runs < 1UL) {
@@ -130,6 +132,9 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   }
 
   // memory allocation
+  if (use_align) {
+    std::cout << "Using 4KB page-aligned allocations" << std::endl;
+  }
   cudaSetDevice(0);
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
   type::idx* idx = nullptr;        // particle ID
@@ -142,7 +147,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   type::vel_xy* vel_xy;  // velocity (x, y)
   type::vel_z* vel_z;    // velocity (z)
 #endif
-  allocate_particles(&pos, &vel_xy, &vel_z, &idx, num);
+  allocate_particles(&pos, &vel_xy, &vel_z, &idx, num, use_align);
 
   // Allocate host buffers for sec2/direct VFDs when using cudaMalloc
   type::idx* idx_host = nullptr;
@@ -155,10 +160,21 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   if (vfd_name == "sec2" || vfd_name == "direct") {
     auto size = round_up(num, NTHREADS);
     size = round_up(size, THREAD_NUM);
-    idx_host = (type::idx*)malloc(size * sizeof(type::idx));
-    pos_host = (type::pos*)malloc(size * sizeof(type::pos));
-    vel_xy_host = (type::vel_xy*)malloc(size * sizeof(type::vel_xy));
-    vel_z_host = (type::vel_z*)malloc(size * sizeof(type::vel_z));
+    constexpr size_t PAGE_SIZE = 4096;
+    if (use_align) {
+      if (posix_memalign((void**)&idx_host, PAGE_SIZE, size * sizeof(type::idx)) != 0 ||
+          posix_memalign((void**)&pos_host, PAGE_SIZE, size * sizeof(type::pos)) != 0 ||
+          posix_memalign((void**)&vel_xy_host, PAGE_SIZE, size * sizeof(type::vel_xy)) != 0 ||
+          posix_memalign((void**)&vel_z_host, PAGE_SIZE, size * sizeof(type::vel_z)) != 0) {
+        std::cerr << "Failed to allocate page-aligned host buffers for " << vfd_name << " VFD" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    } else {
+      idx_host = (type::idx*)malloc(size * sizeof(type::idx));
+      pos_host = (type::pos*)malloc(size * sizeof(type::pos));
+      vel_xy_host = (type::vel_xy*)malloc(size * sizeof(type::vel_xy));
+      vel_z_host = (type::vel_z*)malloc(size * sizeof(type::vel_z));
+    }
 
     if (!idx_host || !pos_host || !vel_xy_host || !vel_z_host) {
       std::cerr << "Failed to allocate host buffers for " << vfd_name << " VFD" << std::endl;
@@ -277,7 +293,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   std::remove_reference_t<decltype(*pos)>* pos_read = nullptr;        // position (x, y, z) and mass (w)
   std::remove_reference_t<decltype(*vel_xy)>* vel_xy_read = nullptr;  // velocity (x, y)
   std::remove_reference_t<decltype(*vel_z)>* vel_z_read = nullptr;    // velocity (z)
-  allocate_particles(&pos_read, &vel_xy_read, &vel_z_read, &idx_read, num);
+  allocate_particles(&pos_read, &vel_xy_read, &vel_z_read, &idx_read, num, use_align);
 
   // Allocate host buffers for reading with sec2/direct VFDs
   type::idx* idx_read_host = nullptr;
@@ -290,10 +306,21 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     auto size_read = round_up(num, NTHREADS);
     size_read = round_up(size_read, THREAD_NUM);
 
-    idx_read_host = (type::idx*)malloc(size_read * sizeof(type::idx));
-    pos_read_host = (type::pos*)malloc(size_read * sizeof(type::pos));
-    vel_xy_read_host = (type::vel_xy*)malloc(size_read * sizeof(type::vel_xy));
-    vel_z_read_host = (type::vel_z*)malloc(size_read * sizeof(type::vel_z));
+    constexpr size_t PAGE_SIZE_READ = 4096;
+    if (use_align) {
+      if (posix_memalign((void**)&idx_read_host, PAGE_SIZE_READ, size_read * sizeof(type::idx)) != 0 ||
+          posix_memalign((void**)&pos_read_host, PAGE_SIZE_READ, size_read * sizeof(type::pos)) != 0 ||
+          posix_memalign((void**)&vel_xy_read_host, PAGE_SIZE_READ, size_read * sizeof(type::vel_xy)) != 0 ||
+          posix_memalign((void**)&vel_z_read_host, PAGE_SIZE_READ, size_read * sizeof(type::vel_z)) != 0) {
+        std::cerr << "Failed to allocate page-aligned host read buffers for " << vfd_name << " VFD" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    } else {
+      idx_read_host = (type::idx*)malloc(size_read * sizeof(type::idx));
+      pos_read_host = (type::pos*)malloc(size_read * sizeof(type::pos));
+      vel_xy_read_host = (type::vel_xy*)malloc(size_read * sizeof(type::vel_xy));
+      vel_z_read_host = (type::vel_z*)malloc(size_read * sizeof(type::vel_z));
+    }
 
     if (!idx_read_host || !pos_read_host || !vel_xy_read_host || !vel_z_read_host) {
       std::cerr << "Failed to allocate host read buffers for " << vfd_name << " VFD" << std::endl;

@@ -11,6 +11,7 @@
 #include <curand_mtgp32.h>  // defines THREAD_NUM
 #include <helper_cuda.h>    // use checkCudaErrors()
 
+#include <cstdlib>      // posix_memalign
 #include <iostream>     // std::cout, std::endl
 #include <limits>       // std::numeric_limits
 #include <type_traits>  // std::remove_reference_t
@@ -48,7 +49,7 @@ void first_touch_cpu(type::pos* const pos, type::vel_xy* const vel_xy, type::vel
 }
 #endif  // defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
 
-void allocate_particles(type::pos** pos, type::vel_xy** vel_xy, type::vel_z** vel_z, type::idx** idx, const type::idx num) noexcept(false) {
+void allocate_particles(type::pos** pos, type::vel_xy** vel_xy, type::vel_z** vel_z, type::idx** idx, const type::idx num, const bool page_align) noexcept(false) {
   auto size = round_up(num, NTHREADS);
   size = round_up(size, THREAD_NUM);  // for Mersenne Twister
 
@@ -66,10 +67,21 @@ void allocate_particles(type::pos** pos, type::vel_xy** vel_xy, type::vel_z** ve
   checkCudaErrors(cudaMemset(*idx, std::numeric_limits<std::remove_reference_t<decltype(**idx)>>::min(), size * sizeof(std::remove_reference_t<decltype(**idx)>)));
 #else
   // Host malloc for unified memory (Grace Hopper)
-  *pos = (type::pos*)malloc(size * sizeof(std::remove_reference_t<decltype(**pos)>));
-  *vel_xy = (type::vel_xy*)malloc(size * sizeof(std::remove_reference_t<decltype(**vel_xy)>));
-  *vel_z = (type::vel_z*)malloc(size * sizeof(std::remove_reference_t<decltype(**vel_z)>));
-  *idx = (type::idx*)malloc(size * sizeof(std::remove_reference_t<decltype(**idx)>));
+  constexpr size_t PAGE_SIZE = 4096;
+  if (page_align) {
+    if (posix_memalign((void**)pos, PAGE_SIZE, size * sizeof(std::remove_reference_t<decltype(**pos)>)) != 0 ||
+        posix_memalign((void**)vel_xy, PAGE_SIZE, size * sizeof(std::remove_reference_t<decltype(**vel_xy)>)) != 0 ||
+        posix_memalign((void**)vel_z, PAGE_SIZE, size * sizeof(std::remove_reference_t<decltype(**vel_z)>)) != 0 ||
+        posix_memalign((void**)idx, PAGE_SIZE, size * sizeof(std::remove_reference_t<decltype(**idx)>)) != 0) {
+      std::cerr << "Failed to allocate page-aligned particle buffers" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  } else {
+    *pos = (type::pos*)malloc(size * sizeof(std::remove_reference_t<decltype(**pos)>));
+    *vel_xy = (type::vel_xy*)malloc(size * sizeof(std::remove_reference_t<decltype(**vel_xy)>));
+    *vel_z = (type::vel_z*)malloc(size * sizeof(std::remove_reference_t<decltype(**vel_z)>));
+    *idx = (type::idx*)malloc(size * sizeof(std::remove_reference_t<decltype(**idx)>));
+  }
 
 #if defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU)
   // GPU first touch: trigger page allocation on GPU
@@ -142,7 +154,7 @@ void first_touch_netcdf_cpu(float* const position, float* const velocity, float*
 }
 #endif
 
-void allocate_particles_netcdf(float** position, float** velocity, float** mass, type::idx** id, const type::idx num) noexcept(false) {
+void allocate_particles_netcdf(float** position, float** velocity, float** mass, type::idx** id, const type::idx num, const bool page_align) noexcept(false) {
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
   // Standard GPU allocation with cudaMalloc (same as allocate_particles)
   checkCudaErrors(cudaMalloc((void**)position, num * 3 * sizeof(float)));
@@ -157,10 +169,21 @@ void allocate_particles_netcdf(float** position, float** velocity, float** mass,
   checkCudaErrors(cudaMemset(*id, 0, num * sizeof(type::idx)));
 #else
   // Host malloc for unified memory (Grace Hopper)
-  *position = (float*)malloc(num * 3 * sizeof(float));
-  *velocity = (float*)malloc(num * 3 * sizeof(float));
-  *mass = (float*)malloc(num * sizeof(float));
-  *id = (type::idx*)malloc(num * sizeof(type::idx));
+  constexpr size_t PAGE_SIZE = 4096;
+  if (page_align) {
+    if (posix_memalign((void**)position, PAGE_SIZE, num * 3 * sizeof(float)) != 0 ||
+        posix_memalign((void**)velocity, PAGE_SIZE, num * 3 * sizeof(float)) != 0 ||
+        posix_memalign((void**)mass, PAGE_SIZE, num * sizeof(float)) != 0 ||
+        posix_memalign((void**)id, PAGE_SIZE, num * sizeof(type::idx)) != 0) {
+      std::cerr << "Failed to allocate page-aligned NetCDF particle buffers" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  } else {
+    *position = (float*)malloc(num * 3 * sizeof(float));
+    *velocity = (float*)malloc(num * 3 * sizeof(float));
+    *mass = (float*)malloc(num * sizeof(float));
+    *id = (type::idx*)malloc(num * sizeof(type::idx));
+  }
 
   if (!*position || !*velocity || !*mass || !*id) {
     std::cerr << "Failed to allocate NetCDF particle buffers" << std::endl;

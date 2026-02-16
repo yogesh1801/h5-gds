@@ -21,7 +21,7 @@
 #include <boost/uuid/uuid_generators.hpp>  // boost::uuids::random_generator
 #include <boost/uuid/uuid_io.hpp>          // convert boost::uuids::uuid to std::string
 #include <algorithm>                       // std::min_element, std::max_element
-#include <cstdlib>                         // std::exit
+#include <cstdlib>                         // std::exit, posix_memalign
 #include <cstring>                         // strerror
 #include <fstream>                         // std::ofstream
 #include <numeric>                         // std::accumulate
@@ -64,6 +64,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
       "mass", boost::program_options::value<float>()->default_value(1.0), "total mass of the system")(
       "runs", boost::program_options::value<size_t>()->default_value(3), "number of benchmark runs for min/max/avg")(
       "warmup-runs", boost::program_options::value<size_t>()->default_value(0), "number of warm-up I/O runs (discarded, no timing)")(
+      "align", boost::program_options::bool_switch()->default_value(false), "use 4KB page-aligned allocations (malloc/first-touch and host buffers)")(
       "help,h", "Help");
   // read input arguments
   boost::program_options::variables_map vm;
@@ -82,6 +83,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   const auto skip = vm["skip"].as<bool>();
   const auto num_runs = vm["runs"].as<size_t>();
   const auto warmup_runs = vm["warmup-runs"].as<size_t>();
+  const auto use_align = vm["align"].as<bool>();
   vm.clear();
   if (num_runs < 1UL) {
     std::cerr << "runs must be >= 1" << std::endl;
@@ -90,6 +92,9 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 
   // VFD is configured externally via HDF5_DRIVER environment variable
   std::cout << "Using HDF5 VFD from HDF5_DRIVER environment variable for NetCDF-4" << std::endl;
+  if (use_align) {
+    std::cout << "Using 4KB page-aligned allocations" << std::endl;
+  }
 
   // memory allocation - NetCDF-compatible layout (Nx3 position, Nx3 velocity, N mass, N id)
   cudaSetDevice(0);
@@ -97,7 +102,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   float* velocity = nullptr;
   float* mass_buf = nullptr;
   type::idx* id = nullptr;
-  allocate_particles_netcdf(&position, &velocity, &mass_buf, &id, num);
+  allocate_particles_netcdf(&position, &velocity, &mass_buf, &id, num, use_align);
 
   // Generate initial data directly in NetCDF-compatible layout
   set_uniform_sphere_netcdf(num, position, velocity, mass_buf, id, mass, radius, virial, newton);
@@ -110,10 +115,21 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
   // Allocate host staging buffers for NetCDF I/O (NetCDF cannot write from GPU memory)
-  position_host = (float*)malloc(num * 3 * sizeof(float));
-  velocity_host = (float*)malloc(num * 3 * sizeof(float));
-  mass_host = (float*)malloc(num * sizeof(float));
-  id_host = (type::idx*)malloc(num * sizeof(type::idx));
+  constexpr size_t PAGE_SIZE = 4096;
+  if (use_align) {
+    if (posix_memalign((void**)&position_host, PAGE_SIZE, num * 3 * sizeof(float)) != 0 ||
+        posix_memalign((void**)&velocity_host, PAGE_SIZE, num * 3 * sizeof(float)) != 0 ||
+        posix_memalign((void**)&mass_host, PAGE_SIZE, num * sizeof(float)) != 0 ||
+        posix_memalign((void**)&id_host, PAGE_SIZE, num * sizeof(type::idx)) != 0) {
+      std::cerr << "Failed to allocate page-aligned host staging buffers" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  } else {
+    position_host = (float*)malloc(num * 3 * sizeof(float));
+    velocity_host = (float*)malloc(num * 3 * sizeof(float));
+    mass_host = (float*)malloc(num * sizeof(float));
+    id_host = (type::idx*)malloc(num * sizeof(type::idx));
+  }
 
   if (!position_host || !velocity_host || !mass_host || !id_host) {
     std::cerr << "Failed to allocate host staging buffers" << std::endl;
@@ -162,7 +178,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   float* velocity_read = nullptr;
   float* mass_read = nullptr;
   type::idx* id_read = nullptr;
-  allocate_particles_netcdf(&position_read, &velocity_read, &mass_read, &id_read, num);
+  allocate_particles_netcdf(&position_read, &velocity_read, &mass_read, &id_read, num, use_align);
 
   float* position_read_host = nullptr;
   float* velocity_read_host = nullptr;
@@ -170,10 +186,21 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   type::idx* id_read_host = nullptr;
 
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
-  position_read_host = (float*)malloc(num * 3 * sizeof(float));
-  velocity_read_host = (float*)malloc(num * 3 * sizeof(float));
-  mass_read_host = (float*)malloc(num * sizeof(float));
-  id_read_host = (type::idx*)malloc(num * sizeof(type::idx));
+  constexpr size_t PAGE_SIZE_READ = 4096;
+  if (use_align) {
+    if (posix_memalign((void**)&position_read_host, PAGE_SIZE_READ, num * 3 * sizeof(float)) != 0 ||
+        posix_memalign((void**)&velocity_read_host, PAGE_SIZE_READ, num * 3 * sizeof(float)) != 0 ||
+        posix_memalign((void**)&mass_read_host, PAGE_SIZE_READ, num * sizeof(float)) != 0 ||
+        posix_memalign((void**)&id_read_host, PAGE_SIZE_READ, num * sizeof(type::idx)) != 0) {
+      std::cerr << "Failed to allocate page-aligned host read buffers" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  } else {
+    position_read_host = (float*)malloc(num * 3 * sizeof(float));
+    velocity_read_host = (float*)malloc(num * 3 * sizeof(float));
+    mass_read_host = (float*)malloc(num * sizeof(float));
+    id_read_host = (type::idx*)malloc(num * sizeof(type::idx));
+  }
 #endif
 
   auto* position_read_ptr = position_read;
