@@ -20,9 +20,9 @@
 /// @param[out] vel_z particle velocity (z)
 /// @param[out] idx particle ID
 /// @param[in] num number of particles
-/// @param[in] page_align use 4KB page-aligned allocation (malloc path only, for first-touch)
+/// @param[in] align_bytes alignment in bytes (0=disabled; e.g. 4096 for 4KB, 65536 for 64KB; power of 2)
 ///
-void allocate_particles(type::pos** pos, type::vel_xy** vel_xy, type::vel_z** vel_z, type::idx** idx, type::idx num, bool page_align = false);
+void allocate_particles(type::pos** pos, type::vel_xy** vel_xy, type::vel_z** vel_z, type::idx** idx, type::idx num, size_t align_bytes = 0);
 
 ///
 /// @brief release memory on GPU
@@ -42,9 +42,9 @@ void release_particles(type::pos* pos, type::vel_xy* vel_xy, type::vel_z* vel_z,
 /// @param[out] mass particle mass (N elements)
 /// @param[out] id particle ID (N elements)
 /// @param[in] num number of particles
-/// @param[in] page_align use 4KB page-aligned allocation (malloc path only, for first-touch)
+/// @param[in] align_bytes alignment in bytes (0=disabled; e.g. 4096 for 4KB, 65536 for 64KB; power of 2)
 ///
-void allocate_particles_netcdf(float** position, float** velocity, float** mass, type::idx** id, type::idx num, bool page_align = false);
+void allocate_particles_netcdf(float** position, float** velocity, float** mass, type::idx** id, type::idx num, size_t align_bytes = 0);
 
 ///
 /// @brief release memory for NetCDF-compatible particle layout

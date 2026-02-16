@@ -85,7 +85,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
       "xdmf", boost::program_options::bool_switch()->default_value(false), "generate XDMF file to visualize the snapshot")(
       "runs", boost::program_options::value<size_t>()->default_value(3), "number of benchmark runs for min/max/avg")(
       "warmup-runs", boost::program_options::value<size_t>()->default_value(0), "number of warm-up I/O runs (discarded, no timing)")(
-      "align", boost::program_options::bool_switch()->default_value(false), "use 4KB page-aligned allocations (malloc/first-touch and host buffers)")(
+      "align", boost::program_options::value<size_t>()->default_value(0), "alignment in KB (0=disabled, e.g. 4=4KB, 64=64KB)")(
       "compute", boost::program_options::bool_switch()->default_value(false), "enable compute benchmark (kinetic energy kernel, num_runs iterations)")(
       "help,h", "Help");
   // read input arguments
@@ -110,7 +110,9 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   const auto write_xdmf = vm["xdmf"].as<bool>();
   const auto num_runs = vm["runs"].as<size_t>();
   const auto warmup_runs = vm["warmup-runs"].as<size_t>();
-  const auto use_align = vm["align"].as<bool>();
+  const auto align_kb = vm["align"].as<size_t>();
+  const auto align_bytes = (align_kb > 0) ? (align_kb * 1024) : size_t(0);
+  const auto use_align = (align_bytes > 0);
   const auto do_compute = vm["compute"].as<bool>();
   vm.clear();
   if (num_runs < 1UL) {
@@ -133,7 +135,11 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
 
   // memory allocation
   if (use_align) {
-    std::cout << "Using 4KB page-aligned allocations" << std::endl;
+    if ((align_bytes & (align_bytes - 1)) != 0) {
+      std::cerr << "Alignment must be a power of 2 (e.g. 4, 64); got " << align_kb << " KB = " << align_bytes << " bytes" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    std::cout << "Using " << align_kb << " KB (" << align_bytes << " byte) aligned allocations" << std::endl;
   }
   cudaSetDevice(0);
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
@@ -147,7 +153,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   type::vel_xy* vel_xy;  // velocity (x, y)
   type::vel_z* vel_z;    // velocity (z)
 #endif
-  allocate_particles(&pos, &vel_xy, &vel_z, &idx, num, use_align);
+  allocate_particles(&pos, &vel_xy, &vel_z, &idx, num, align_bytes);
 
   // Allocate host buffers for sec2/direct VFDs when using cudaMalloc
   type::idx* idx_host = nullptr;
@@ -160,12 +166,11 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   if (vfd_name == "sec2" || vfd_name == "direct") {
     auto size = round_up(num, NTHREADS);
     size = round_up(size, THREAD_NUM);
-    constexpr size_t PAGE_SIZE = 4096;
     if (use_align) {
-      if (posix_memalign((void**)&idx_host, PAGE_SIZE, size * sizeof(type::idx)) != 0 ||
-          posix_memalign((void**)&pos_host, PAGE_SIZE, size * sizeof(type::pos)) != 0 ||
-          posix_memalign((void**)&vel_xy_host, PAGE_SIZE, size * sizeof(type::vel_xy)) != 0 ||
-          posix_memalign((void**)&vel_z_host, PAGE_SIZE, size * sizeof(type::vel_z)) != 0) {
+      if (posix_memalign((void**)&idx_host, align_bytes, size * sizeof(type::idx)) != 0 ||
+          posix_memalign((void**)&pos_host, align_bytes, size * sizeof(type::pos)) != 0 ||
+          posix_memalign((void**)&vel_xy_host, align_bytes, size * sizeof(type::vel_xy)) != 0 ||
+          posix_memalign((void**)&vel_z_host, align_bytes, size * sizeof(type::vel_z)) != 0) {
         std::cerr << "Failed to allocate page-aligned host buffers for " << vfd_name << " VFD" << std::endl;
         std::exit(EXIT_FAILURE);
       }
@@ -293,7 +298,7 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
   std::remove_reference_t<decltype(*pos)>* pos_read = nullptr;        // position (x, y, z) and mass (w)
   std::remove_reference_t<decltype(*vel_xy)>* vel_xy_read = nullptr;  // velocity (x, y)
   std::remove_reference_t<decltype(*vel_z)>* vel_z_read = nullptr;    // velocity (z)
-  allocate_particles(&pos_read, &vel_xy_read, &vel_z_read, &idx_read, num, use_align);
+  allocate_particles(&pos_read, &vel_xy_read, &vel_z_read, &idx_read, num, align_bytes);
 
   // Allocate host buffers for reading with sec2/direct VFDs
   type::idx* idx_read_host = nullptr;
@@ -306,12 +311,11 @@ auto main(const int32_t argc, const char* const* const argv) -> int32_t {
     auto size_read = round_up(num, NTHREADS);
     size_read = round_up(size_read, THREAD_NUM);
 
-    constexpr size_t PAGE_SIZE_READ = 4096;
     if (use_align) {
-      if (posix_memalign((void**)&idx_read_host, PAGE_SIZE_READ, size_read * sizeof(type::idx)) != 0 ||
-          posix_memalign((void**)&pos_read_host, PAGE_SIZE_READ, size_read * sizeof(type::pos)) != 0 ||
-          posix_memalign((void**)&vel_xy_read_host, PAGE_SIZE_READ, size_read * sizeof(type::vel_xy)) != 0 ||
-          posix_memalign((void**)&vel_z_read_host, PAGE_SIZE_READ, size_read * sizeof(type::vel_z)) != 0) {
+      if (posix_memalign((void**)&idx_read_host, align_bytes, size_read * sizeof(type::idx)) != 0 ||
+          posix_memalign((void**)&pos_read_host, align_bytes, size_read * sizeof(type::pos)) != 0 ||
+          posix_memalign((void**)&vel_xy_read_host, align_bytes, size_read * sizeof(type::vel_xy)) != 0 ||
+          posix_memalign((void**)&vel_z_read_host, align_bytes, size_read * sizeof(type::vel_z)) != 0) {
         std::cerr << "Failed to allocate page-aligned host read buffers for " << vfd_name << " VFD" << std::endl;
         std::exit(EXIT_FAILURE);
       }

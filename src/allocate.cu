@@ -49,7 +49,7 @@ void first_touch_cpu(type::pos* const pos, type::vel_xy* const vel_xy, type::vel
 }
 #endif  // defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
 
-void allocate_particles(type::pos** pos, type::vel_xy** vel_xy, type::vel_z** vel_z, type::idx** idx, const type::idx num, const bool page_align) noexcept(false) {
+void allocate_particles(type::pos** pos, type::vel_xy** vel_xy, type::vel_z** vel_z, type::idx** idx, const type::idx num, const size_t align_bytes) noexcept(false) {
   auto size = round_up(num, NTHREADS);
   size = round_up(size, THREAD_NUM);  // for Mersenne Twister
 
@@ -67,13 +67,12 @@ void allocate_particles(type::pos** pos, type::vel_xy** vel_xy, type::vel_z** ve
   checkCudaErrors(cudaMemset(*idx, std::numeric_limits<std::remove_reference_t<decltype(**idx)>>::min(), size * sizeof(std::remove_reference_t<decltype(**idx)>)));
 #else
   // Host malloc for unified memory (Grace Hopper)
-  constexpr size_t PAGE_SIZE = 4096;
-  if (page_align) {
-    if (posix_memalign((void**)pos, PAGE_SIZE, size * sizeof(std::remove_reference_t<decltype(**pos)>)) != 0 ||
-        posix_memalign((void**)vel_xy, PAGE_SIZE, size * sizeof(std::remove_reference_t<decltype(**vel_xy)>)) != 0 ||
-        posix_memalign((void**)vel_z, PAGE_SIZE, size * sizeof(std::remove_reference_t<decltype(**vel_z)>)) != 0 ||
-        posix_memalign((void**)idx, PAGE_SIZE, size * sizeof(std::remove_reference_t<decltype(**idx)>)) != 0) {
-      std::cerr << "Failed to allocate page-aligned particle buffers" << std::endl;
+  if (align_bytes > 0) {
+    if (posix_memalign((void**)pos, align_bytes, size * sizeof(std::remove_reference_t<decltype(**pos)>)) != 0 ||
+        posix_memalign((void**)vel_xy, align_bytes, size * sizeof(std::remove_reference_t<decltype(**vel_xy)>)) != 0 ||
+        posix_memalign((void**)vel_z, align_bytes, size * sizeof(std::remove_reference_t<decltype(**vel_z)>)) != 0 ||
+        posix_memalign((void**)idx, align_bytes, size * sizeof(std::remove_reference_t<decltype(**idx)>)) != 0) {
+      std::cerr << "Failed to allocate aligned particle buffers (align=" << align_bytes << " bytes)" << std::endl;
       std::exit(EXIT_FAILURE);
     }
   } else {
@@ -154,7 +153,7 @@ void first_touch_netcdf_cpu(float* const position, float* const velocity, float*
 }
 #endif
 
-void allocate_particles_netcdf(float** position, float** velocity, float** mass, type::idx** id, const type::idx num, const bool page_align) noexcept(false) {
+void allocate_particles_netcdf(float** position, float** velocity, float** mass, type::idx** id, const type::idx num, const size_t align_bytes) noexcept(false) {
 #if !defined(HOST_MALLOC_AND_FIRST_TOUCH_GPU) && !defined(HOST_MALLOC_AND_FIRST_TOUCH_CPU)
   // Standard GPU allocation with cudaMalloc (same as allocate_particles)
   checkCudaErrors(cudaMalloc((void**)position, num * 3 * sizeof(float)));
@@ -169,13 +168,12 @@ void allocate_particles_netcdf(float** position, float** velocity, float** mass,
   checkCudaErrors(cudaMemset(*id, 0, num * sizeof(type::idx)));
 #else
   // Host malloc for unified memory (Grace Hopper)
-  constexpr size_t PAGE_SIZE = 4096;
-  if (page_align) {
-    if (posix_memalign((void**)position, PAGE_SIZE, num * 3 * sizeof(float)) != 0 ||
-        posix_memalign((void**)velocity, PAGE_SIZE, num * 3 * sizeof(float)) != 0 ||
-        posix_memalign((void**)mass, PAGE_SIZE, num * sizeof(float)) != 0 ||
-        posix_memalign((void**)id, PAGE_SIZE, num * sizeof(type::idx)) != 0) {
-      std::cerr << "Failed to allocate page-aligned NetCDF particle buffers" << std::endl;
+  if (align_bytes > 0) {
+    if (posix_memalign((void**)position, align_bytes, num * 3 * sizeof(float)) != 0 ||
+        posix_memalign((void**)velocity, align_bytes, num * 3 * sizeof(float)) != 0 ||
+        posix_memalign((void**)mass, align_bytes, num * sizeof(float)) != 0 ||
+        posix_memalign((void**)id, align_bytes, num * sizeof(type::idx)) != 0) {
+      std::cerr << "Failed to allocate aligned NetCDF particle buffers (align=" << align_bytes << " bytes)" << std::endl;
       std::exit(EXIT_FAILURE);
     }
   } else {
